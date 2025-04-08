@@ -18,12 +18,13 @@ y_test = y_test.flatten()
 class_names = ['airplane', 'automobile', 'bird', 'cat', 'deer',
                'dog', 'frog', 'horse', 'ship', 'truck']
 
-num_train = 50,000
-num_test = 10,000
-training_images = x_train[:num_train]
-training_labels = y_train[:num_train]
-test_images = x_test[:num_test]
-test_labels = y_test[:num_test]
+# Full CIFAR-10 dataset for more robust training
+num_train = 50000
+num_test = 10000
+training_images = x_train[:num_train].copy()
+training_labels = y_train[:num_train].copy()
+test_images = x_test[:num_test].copy()
+test_labels = y_test[:num_test].copy()
 
 def poisson_encode_image(image_color, duration=100, max_rate=100):
     image = rgb2gray(image_color.astype(float) / 255.0)
@@ -156,7 +157,8 @@ for epoch in range(num_epochs):
         G_hidden2.v = 0
         G_output.v = 0
 
-        net.run(100 * ms)
+        # Increased simulation time to 200ms for better spike integration
+        net.run(200 * ms)
 
         spike_counts = np.array([(spike_monitor_output.i == neur).sum() for neur in range(N_output)])
         pred_label = spike_counts.argmax()
@@ -182,29 +184,37 @@ except ValueError:
     weight_matrix = np.zeros((100, 100))
 print("Training complete.")
 
-# Evaluation block remains unchanged (optionally apply reward modulation during test too)
+# Evaluation block with reward modulation during test
+print("Starting evaluation...")
 y_true = []
 y_pred = []
 
-print("Starting evaluation...")
-
-for idx, (img, true_label) in enumerate(zip(test_images, test_labels)):
+for idx, (img, label) in enumerate(zip(test_images, test_labels)):
     spikes, _ = poisson_encode_image(img)
     input_indices = [s[0] for s in spikes]
-    input_times = [s[1] * ms for s in spikes]
+    input_times = [s[1] for s in spikes]
 
-    G_input.set_spikes(input_indices, input_times)
+    current_offset = float(defaultclock.t / ms)
+    shifted_times = [(t + current_offset) * ms for t in input_times]
+    G_input.set_spikes(input_indices, shifted_times)
 
     G_hidden1.v = 0
     G_hidden2.v = 0
     G_output.v = 0
 
-    net.run(100 * ms)
+    net.run(200 * ms)
+
     spike_counts = np.array([(spike_monitor_output.i == neur).sum() for neur in range(N_output)])
     pred_label = spike_counts.argmax()
-    y_true.append(true_label)
+    y_true.append(label)
     y_pred.append(pred_label)
-    print(f"  Evaluated test image {idx + 1}/{num_test}")
+
+    # Apply reward modulation during test as well
+    reward_val = 1.0 if pred_label == label else -1.0
+    reward_signal.values = np.full_like(reward_signal.values, reward_val)
+
+    if idx % 100 == 0:
+        print(f"  Evaluated test image {idx + 1}/{num_test}")
 
 cm = confusion_matrix(y_true, y_pred)
 print("Confusion Matrix:")
@@ -218,52 +228,21 @@ plt.ylabel("True Label")
 plt.title("Confusion Matrix")
 plt.show()
 
-plt.figure()
-plt.title("Hidden Layer Spikes (Last Test Image)")
-plt.plot(spike_monitor_hidden.t / ms, spike_monitor_hidden.i, 'k.')
-plt.xlabel("Time (ms)")
-plt.ylabel("Hidden Neuron Index")
-plt.show()
-
-neuron_idx = 0
-plt.figure()
-plt.title(f"Membrane Potential of Hidden Neuron {neuron_idx}")
-plt.plot(state_monitor_hidden.t / ms, state_monitor_hidden.v[neuron_idx])
-plt.xlabel("Time (ms)")
-plt.ylabel("Membrane Potential (v)")
-plt.show()
-
-print("\nOutput neuron firing activity (last test image):")
-for i in range(N_output):
-    count = (spike_monitor_output.i == i).sum()
-    print(f"Output neuron {i} fired {count} times")
-
-firing_counts = Counter(spike_monitor_hidden.i)
-heatmap_data = np.zeros(N_hidden2)
-for neuron_idx, count in firing_counts.items():
-    heatmap_data[neuron_idx] = count
-
+# Rich visual diagnostics
 plt.figure(figsize=(12, 3))
-plt.title("Hidden Neuron Firing Rates")
-plt.bar(range(N_hidden2), heatmap_data)
+plt.title("Hidden Neuron Firing Rates (Training Summary)")
+counts = Counter(spike_monitor_hidden.i)
+activity = np.zeros(N_hidden2)
+for i, c in counts.items():
+    activity[i] = c
+plt.bar(range(N_hidden2), activity)
 plt.xlabel("Neuron Index")
 plt.ylabel("Spikes")
 plt.show()
 
-plt.figure()
-plt.title("Output Neuron Spikes (Last Test Image)")
-plt.plot(spike_monitor_output.t / ms, spike_monitor_output.i, 'r.')
-plt.xlabel("Time (ms)")
-plt.ylabel("Output Neuron Index")
+plt.figure(figsize=(6, 5))
+sns.heatmap(weight_matrix, cmap='viridis')
+plt.title("Weight Matrix Visualization (100x100 block)")
+plt.xlabel("Hidden Neuron")
+plt.ylabel("Input Neuron")
 plt.show()
-
-print(f"\nLast Test Image: Output Spike Counts = {spike_counts}, Predicted = {pred_label}, True = {true_label}")
-
-if previous_weights is not None:
-    weight_matrix = np.array(previous_weights).reshape((N_input, N_hidden1))[:100, :100]
-    plt.figure(figsize=(6, 5))
-    sns.heatmap(weight_matrix, cmap='viridis')
-    plt.title("Input-to-Hidden Synaptic Weights (STDP)")
-    plt.xlabel("Hidden Neuron")
-    plt.ylabel("Input Neuron")
-    plt.show()
