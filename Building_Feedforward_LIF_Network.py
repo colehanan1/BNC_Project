@@ -1,29 +1,23 @@
-from brian2 import *  # Brian2 for SNN simulation
+from brian2 import *
 from brian2 import prefs
-from skimage.filters import gabor
-from skimage.color import rgb2gray
-
-prefs.codegen.target = "numpy"  # Use numpy code generation to avoid clang/Cython issues
+prefs.codegen.target = "numpy"
 
 import numpy as np
 from tensorflow.keras.datasets import cifar10
+from skimage.filters import gabor
+from skimage.color import rgb2gray
 import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.metrics import confusion_matrix
 
-# Make sure np.clip is available in the global namespace
 clip = np.clip
 
-# ---------------------------
-# Load CIFAR-10 and define class names
-# ---------------------------
 (x_train, y_train), (x_test, y_test) = cifar10.load_data()
 y_train = y_train.flatten()
 y_test = y_test.flatten()
 class_names = ['airplane', 'automobile', 'bird', 'cat', 'deer',
                'dog', 'frog', 'horse', 'ship', 'truck']
 
-# For demonstration, use a small subset:
 num_train = 50
 num_test = 20
 training_images = x_train[:num_train]
@@ -31,39 +25,21 @@ training_labels = y_train[:num_train]
 test_images = x_test[:num_test]
 test_labels = y_test[:num_test]
 
-
-# ---------------------------
-# Helper Functions
-# ---------------------------
-def encode_image_to_spikes(image_color, T_max=100.0, threshold=0.1,
-                           frequency=0.3, orientations=16):
-    """
-    Encode a color image into spike times using a Gabor filter bank and latency coding.
-    """
+def encode_image_to_spikes(image_color, T_max=100.0, threshold=0.2,
+                           frequency=0.3, orientations=8):
     image = rgb2gray(image_color.astype(float) / 255.0)
-
-    # Apply Gabor filters with different orientations
+    p2, p98 = np.percentile(image, (2, 98))
+    image = np.clip((image - p2) / (p98 - p2 + 1e-8), 0, 1)
     gabor_sum = np.zeros_like(image)
     for theta in np.linspace(0, np.pi, orientations, endpoint=False):
         filt_real, _ = gabor(image, frequency=frequency, theta=theta)
-        gabor_sum += filt_real  # sum responses across orientations
-
-    # Normalize to [0, 1]
+        gabor_sum += filt_real
     gabor_norm = (gabor_sum - gabor_sum.min()) / (gabor_sum.max() - gabor_sum.min() + 1e-8)
-
-    # Latency coding: high activation → earlier spike
     spike_times = T_max * (1.0 - gabor_norm)
-    spike_times[gabor_norm < threshold] = np.inf  # suppress weak spikes
+    spike_times[gabor_norm < threshold] = np.inf
     return spike_times, image
 
-
 def spikes_from_array(spike_times):
-    """
-    Convert a 2D spike_times array into lists of neuron indices and spike times.
-    Returns:
-      input_indices: list of neuron indices
-      input_times: list of spike times (in ms) – these are relative times (starting at 0).
-    """
     input_indices = []
     input_times = []
     H, W = spike_times.shape
@@ -73,17 +49,13 @@ def spikes_from_array(spike_times):
             if np.isfinite(t):
                 neuron_idx = i * W + j
                 input_indices.append(neuron_idx)
-                input_times.append(t)  # leave as numeric (ms); we add units later.
+                input_times.append(t)
     return input_indices, input_times
 
-
-# ---------------------------
-# Define STDP parameters and synapse model for input->hidden connection
-# ---------------------------
 tau_pre = 20 * ms
 tau_post = 20 * ms
 A_pre = 0.01
-A_post = -0.012  # negative value for depression
+A_post = -0.012
 w_max = 1.0
 
 stdp_model = '''
@@ -103,101 +75,77 @@ post += A_post
 w = clip(w + pre, 0, w_max)
 '''
 
-# ---------------------------
-# Build hidden and output layers (these remain fixed during training)
-# ---------------------------
-# Use one example image to get dimensions.
 example_spike_times, gray_example = encode_image_to_spikes(training_images[0])
 H_img, W_img = gray_example.shape
-N_input = H_img * W_img  # one input neuron per pixel
-N_hidden = 100  # adjustable number of hidden neurons
-N_output = 10  # one neuron per class
+N_input = H_img * W_img
+N_hidden1 = 500
+N_hidden2 = 200
+N_output = 10
 
-# Define neuron model (LIF neurons)
-tau = 10 * ms  # membrane time constant (global variable)
-V_th = 0.5  # threshold
-V_reset = 0.0  # reset potential
-refractory = 5 * ms  # refractory period
+tau = 10 * ms
+V_th = 0.5
+V_reset = 0.0
+refractory = 5 * ms
 
 eqs = '''
 dv/dt = -v/tau : 1 (unless refractory)
 '''
 
-# Create hidden and output groups.
-G_hidden = NeuronGroup(N_hidden, eqs, threshold='v > V_th', reset='v = V_reset',
-                       refractory=refractory, method='linear')
+G_hidden1 = NeuronGroup(N_hidden1, eqs, threshold='v > V_th', reset='v = V_reset',
+                        refractory=refractory, method='linear')
+G_hidden2 = NeuronGroup(N_hidden2, eqs, threshold='v > V_th', reset='v = V_reset',
+                        refractory=refractory, method='linear')
 G_output = NeuronGroup(N_output, eqs, threshold='v > V_th', reset='v = V_reset',
                        refractory=refractory, method='linear')
 
-# Create synapses from hidden to output (non-STDP, fixed for now).
-syn_hidden_out = Synapses(G_hidden, G_output, model='w : 1', on_pre='v_post += w')
-syn_hidden_out.connect(p=1.0)
-syn_hidden_out.w = '0.1 * rand()'
+syn_hidden1_hidden2 = Synapses(G_hidden1, G_hidden2, model='w : 1', on_pre='v_post += w')
+syn_hidden1_hidden2.connect(p=1.0)
+syn_hidden1_hidden2.w = '0.1 * rand()'
 
-# Create monitors for hidden and output layers.
-spike_monitor_hidden = SpikeMonitor(G_hidden)
+syn_hidden2_output = Synapses(G_hidden2, G_output, model='w : 1', on_pre='v_post += w')
+syn_hidden2_output.connect(p=1.0)
+syn_hidden2_output.w = '0.1 * rand()'
+
+spike_monitor_hidden = SpikeMonitor(G_hidden2)
 spike_monitor_output = SpikeMonitor(G_output)
-state_monitor_hidden = StateMonitor(G_hidden, 'v', record=True)
+state_monitor_hidden = StateMonitor(G_hidden2, 'v', record=True)
 
-# ---------------------------
-# Create the Network object with fixed components.
-# ---------------------------
 net = Network()
-# We do NOT add the input group and its synapses yet (they will be added per training sample).
-net.add(G_hidden, G_output, syn_hidden_out,
+net.add(G_hidden1, G_hidden2, G_output,
+        syn_hidden1_hidden2, syn_hidden2_output,
         spike_monitor_hidden, spike_monitor_output, state_monitor_hidden)
 
-# ---------------------------
-# Training loop
-# ---------------------------
-num_epochs = 10  # for demonstration; increase as needed
-previous_weights = None  # to carry over synaptic weights between samples
+num_epochs = 10
+previous_weights = None
 
 print("Starting training...")
 
 for epoch in range(num_epochs):
     print(f"Epoch {epoch + 1}")
     for idx, (img, label) in enumerate(zip(training_images, training_labels)):
-        # Encode image into spike times.
         spike_times, _ = encode_image_to_spikes(img)
         input_indices, input_times = spikes_from_array(spike_times)
-
-        # Get the current simulation time offset.
-        current_offset = float(defaultclock.t / ms)  # in ms
-
-        # Shift input spike times so that they occur after the current simulation time.
+        current_offset = float(defaultclock.t / ms)
         shifted_input_times = [(t + current_offset) * ms for t in input_times]
 
-        # Remove any existing input group.
-        try:
-            net.remove(G_input)
-        except Exception:
-            pass
-        # Create a new input group with the current image's (shifted) spikes.
+        try: net.remove(G_input)
+        except: pass
         G_input = SpikeGeneratorGroup(N_input, input_indices, shifted_input_times)
         net.add(G_input)
 
-        # Remove and re-create the STDP synapses from input to hidden.
-        try:
-            net.remove(syn_in_hidden)
-        except Exception:
-            pass
-        syn_in_hidden = Synapses(G_input, G_hidden, model=stdp_model,
-                                 on_pre=stdp_on_pre, on_post=stdp_on_post)
-        syn_in_hidden.connect(p=1.0)
+        try: net.remove(syn_in_hidden1)
+        except: pass
+        syn_in_hidden1 = Synapses(G_input, G_hidden1, model=stdp_model,
+                                  on_pre=stdp_on_pre, on_post=stdp_on_post)
+        syn_in_hidden1.connect(p=1.0)
         if previous_weights is not None:
-            syn_in_hidden.w = previous_weights
+            syn_in_hidden1.w = previous_weights
         else:
-            syn_in_hidden.w = '0.1 * rand()'
-        net.add(syn_in_hidden)
+            syn_in_hidden1.w = '0.1 * rand()'
+        net.add(syn_in_hidden1)
 
-        # Run simulation for this image.
         net.run(100 * ms)
-        # (No need to reset the clock; we already shift spike times each run.)
-
-        # Store updated weights for next iteration.
-        previous_weights = syn_in_hidden.w[:]
-
+        previous_weights = syn_in_hidden1.w[:]
         print(f"  Trained on image {idx + 1}/{num_train} in epoch {epoch + 1}")
 
 print("Training complete.")
