@@ -35,7 +35,7 @@ test_labels = y_test[:num_test]
 # ---------------------------
 # Helper Functions
 # ---------------------------
-def encode_image_to_spikes(image_color, T_max=100.0, threshold=0.3,
+def encode_image_to_spikes(image_color, T_max=100.0, threshold=0.1,
                            frequency=0.3, orientations=16):
     """
     Encode a color image into spike times using a Gabor filter bank and latency coding.
