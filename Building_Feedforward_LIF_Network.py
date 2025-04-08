@@ -4,7 +4,6 @@ prefs.codegen.target = "numpy"
 
 import numpy as np
 from tensorflow.keras.datasets import cifar10
-from skimage.filters import gabor
 from skimage.color import rgb2gray
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -26,32 +25,20 @@ training_labels = y_train[:num_train]
 test_images = x_test[:num_test]
 test_labels = y_test[:num_test]
 
-def encode_image_to_spikes(image_color, T_max=100.0, threshold=0.5,
-                           frequency=0.3, orientations=8):
+def poisson_encode_image(image_color, duration=100, max_rate=100):
     image = rgb2gray(image_color.astype(float) / 255.0)
     p2, p98 = np.percentile(image, (2, 98))
     image = np.clip((image - p2) / (p98 - p2 + 1e-8), 0, 1)
-    gabor_sum = np.zeros_like(image)
-    for theta in np.linspace(0, np.pi, orientations, endpoint=False):
-        filt_real, _ = gabor(image, frequency=frequency, theta=theta)
-        gabor_sum += filt_real
-    gabor_norm = (gabor_sum - gabor_sum.min()) / (gabor_sum.max() - gabor_sum.min() + 1e-8)
-    spike_times = T_max * (1.0 - gabor_norm)
-    spike_times[gabor_norm < threshold] = np.inf
-    return spike_times, image
-
-def spikes_from_array(spike_times):
-    input_indices = []
-    input_times = []
-    H, W = spike_times.shape
-    for i in range(H):
-        for j in range(W):
-            t = spike_times[i, j]
-            if np.isfinite(t):
-                neuron_idx = i * W + j
-                input_indices.append(neuron_idx)
-                input_times.append(t)
-    return input_indices, input_times
+    rate_map = image * max_rate
+    spikes = []
+    for t in range(duration):
+        rand_vals = np.random.rand(*rate_map.shape) * max_rate
+        fired = rand_vals < rate_map
+        indices = np.where(fired)
+        for i, j in zip(*indices):
+            neuron_idx = i * image.shape[1] + j
+            spikes.append((neuron_idx, t))
+    return spikes, image
 
 tau_pre = 20 * ms
 tau_post = 20 * ms
@@ -76,8 +63,7 @@ post += A_post
 w = clip(w + pre, 0, w_max)
 '''
 
-example_spike_times, gray_example = encode_image_to_spikes(training_images[0])
-H_img, W_img = gray_example.shape
+H_img, W_img = 32, 32
 N_input = H_img * W_img
 N_hidden1 = 500
 N_hidden2 = 200
@@ -100,12 +86,20 @@ G_output = NeuronGroup(N_output, eqs, threshold='v > V_th', reset='v = V_reset',
                        refractory=refractory, method='linear')
 
 syn_hidden1_hidden2 = Synapses(G_hidden1, G_hidden2, model='w : 1', on_pre='v_post += w')
-syn_hidden1_hidden2.connect(p=0.3)
-syn_hidden1_hidden2.w = '0.1 * rand()'
+syn_hidden1_hidden2.connect(p=0.2)
+syn_hidden1_hidden2.w = '0.01 * rand()'
 
 syn_hidden2_output = Synapses(G_hidden2, G_output, model='w : 1', on_pre='v_post += w')
-syn_hidden2_output.connect(p=0.3)
-syn_hidden2_output.w = '0.1 * rand()'
+syn_hidden2_output.connect(p=0.2)
+syn_hidden2_output.w = '0.01 * rand()'
+
+# Lateral inhibition for hidden2 layer
+lateral_inhib_h2 = Synapses(G_hidden2, G_hidden2, on_pre='v_post -= 0.3')
+lateral_inhib_h2.connect(condition='i != j', p=0.1)
+
+# Inhibition for output layer
+syn_inhib = Synapses(G_output, G_output, on_pre='v_post -= 0.5')
+syn_inhib.connect(condition='i != j')
 
 spike_monitor_hidden = SpikeMonitor(G_hidden2)
 spike_monitor_output = SpikeMonitor(G_output)
@@ -114,11 +108,8 @@ state_monitor_hidden = StateMonitor(G_hidden2, 'v', record=True)
 net = Network()
 net.add(G_hidden1, G_hidden2, G_output,
         syn_hidden1_hidden2, syn_hidden2_output,
+        lateral_inhib_h2, syn_inhib,
         spike_monitor_hidden, spike_monitor_output, state_monitor_hidden)
-
-syn_inhib = Synapses(G_output, G_output, on_pre='v_post -= 0.2')
-syn_inhib.connect(condition='i != j')
-net.add(syn_inhib)
 
 num_epochs = 10
 previous_weights = None
@@ -128,65 +119,65 @@ print("Starting training...")
 for epoch in range(num_epochs):
     print(f"Epoch {epoch + 1}")
     for idx, (img, label) in enumerate(zip(training_images, training_labels)):
-        spike_times, _ = encode_image_to_spikes(img)
-        input_indices, input_times = spikes_from_array(spike_times)
-        current_offset = float(defaultclock.t / ms)
-        shifted_input_times = [(t + current_offset) * ms for t in input_times]
+        spikes, _ = poisson_encode_image(img)
+        input_indices = [s[0] for s in spikes]
+        input_times = [s[1] * ms for s in spikes]
 
         try: net.remove(G_input)
         except: pass
-        G_input = SpikeGeneratorGroup(N_input, input_indices, shifted_input_times)
+        G_input = SpikeGeneratorGroup(N_input, input_indices, input_times)
         net.add(G_input)
 
         try: net.remove(syn_in_hidden1)
         except: pass
         syn_in_hidden1 = Synapses(G_input, G_hidden1, model=stdp_model,
                                   on_pre=stdp_on_pre, on_post=stdp_on_post)
-        syn_in_hidden1.connect(p=1.0)
-        if previous_weights is not None:
-            syn_in_hidden1.w = previous_weights
-        else:
-            syn_in_hidden1.w = '0.1 * rand()'
+        syn_in_hidden1.connect(p=0.2)
+        syn_in_hidden1.w = previous_weights if previous_weights is not None else '0.01 * rand()'
         net.add(syn_in_hidden1)
 
-        net.run(100 * ms)
+        G_hidden1.v = 0
+        G_hidden2.v = 0
+        G_output.v = 0
 
+        net.run(100 * ms)
         previous_weights = syn_in_hidden1.w[:]
         print(f"  Trained on image {idx + 1}/{num_train} in epoch {epoch + 1}")
 
 print("Training complete.")
 
-print("Starting evaluation...")
 y_true = []
 y_pred = []
 
+print("Starting evaluation...")
+
 for idx, (img, true_label) in enumerate(zip(test_images, test_labels)):
-    spike_times, _ = encode_image_to_spikes(img)
-    input_indices, input_times = spikes_from_array(spike_times)
-    current_offset = float(defaultclock.t / ms)
-    shifted_input_times = [(t + current_offset) * ms for t in input_times]
+    spikes, _ = poisson_encode_image(img)
+    input_indices = [s[0] for s in spikes]
+    input_times = [s[1] * ms for s in spikes]
 
     try: net.remove(G_input)
     except: pass
-    G_input = SpikeGeneratorGroup(N_input, input_indices, shifted_input_times)
+    G_input = SpikeGeneratorGroup(N_input, input_indices, input_times)
     net.add(G_input)
 
     try: net.remove(syn_in_hidden1)
     except: pass
     syn_in_hidden1 = Synapses(G_input, G_hidden1, model=stdp_model,
                               on_pre=stdp_on_pre, on_post=stdp_on_post)
-    syn_in_hidden1.connect(p=1.0)
+    syn_in_hidden1.connect(p=0.2)
     syn_in_hidden1.w = previous_weights
     net.add(syn_in_hidden1)
 
-    net.run(100 * ms)
+    G_hidden1.v = 0
+    G_hidden2.v = 0
+    G_output.v = 0
 
+    net.run(100 * ms)
     spike_counts = np.array([(spike_monitor_output.i == neur).sum() for neur in range(N_output)])
     pred_label = spike_counts.argmax()
-
     y_true.append(true_label)
     y_pred.append(pred_label)
-
     print(f"  Evaluated test image {idx + 1}/{num_test}")
 
 cm = confusion_matrix(y_true, y_pred)
@@ -221,7 +212,6 @@ for i in range(N_output):
     count = (spike_monitor_output.i == i).sum()
     print(f"Output neuron {i} fired {count} times")
 
-# Hidden neuron firing rate histogram
 firing_counts = Counter(spike_monitor_hidden.i)
 heatmap_data = np.zeros(N_hidden2)
 for neuron_idx, count in firing_counts.items():
@@ -234,7 +224,6 @@ plt.xlabel("Neuron Index")
 plt.ylabel("Spikes")
 plt.show()
 
-# Raster plot of output neuron spikes
 plt.figure()
 plt.title("Output Neuron Spikes (Last Test Image)")
 plt.plot(spike_monitor_output.t / ms, spike_monitor_output.i, 'r.')
@@ -242,12 +231,10 @@ plt.xlabel("Time (ms)")
 plt.ylabel("Output Neuron Index")
 plt.show()
 
-# Show spike count vector for last sample
 print(f"\nLast Test Image: Output Spike Counts = {spike_counts}, Predicted = {pred_label}, True = {true_label}")
 
-# Visualize STDP weight matrix
 if previous_weights is not None:
-    weight_matrix = np.array(previous_weights).reshape((N_input, N_hidden1))[:100, :100]  # preview 100x100 block
+    weight_matrix = np.array(previous_weights).reshape((N_input, N_hidden1))[:100, :100]
     plt.figure(figsize=(6, 5))
     sns.heatmap(weight_matrix, cmap='viridis')
     plt.title("Input-to-Hidden Synaptic Weights (STDP)")
