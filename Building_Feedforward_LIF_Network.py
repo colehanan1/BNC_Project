@@ -111,14 +111,14 @@ spike_monitor_hidden = SpikeMonitor(G_hidden2)
 spike_monitor_output = SpikeMonitor(G_output)
 state_monitor_hidden = StateMonitor(G_hidden2, 'v', record=True)
 
-syn_inhib = Synapses(G_output, G_output, on_pre='v_post -= 0.2')
-syn_inhib.connect(condition='i != j')
-net.add(syn_inhib)
-
 net = Network()
 net.add(G_hidden1, G_hidden2, G_output,
         syn_hidden1_hidden2, syn_hidden2_output,
         spike_monitor_hidden, spike_monitor_output, state_monitor_hidden)
+
+syn_inhib = Synapses(G_output, G_output, on_pre='v_post -= 0.2')
+syn_inhib.connect(condition='i != j')
+net.add(syn_inhib)
 
 num_epochs = 10
 previous_weights = None
