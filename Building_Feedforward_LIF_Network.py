@@ -26,7 +26,7 @@ training_labels = y_train[:num_train]
 test_images = x_test[:num_test]
 test_labels = y_test[:num_test]
 
-def encode_image_to_spikes(image_color, T_max=100.0, threshold=0.2,
+def encode_image_to_spikes(image_color, T_max=100.0, threshold=0.5,
                            frequency=0.3, orientations=8):
     image = rgb2gray(image_color.astype(float) / 255.0)
     p2, p98 = np.percentile(image, (2, 98))
@@ -55,8 +55,8 @@ def spikes_from_array(spike_times):
 
 tau_pre = 20 * ms
 tau_post = 20 * ms
-A_pre = 0.01
-A_post = -0.012
+A_pre = 0.02
+A_post = -0.03
 w_max = 1.0
 
 stdp_model = '''
@@ -100,16 +100,20 @@ G_output = NeuronGroup(N_output, eqs, threshold='v > V_th', reset='v = V_reset',
                        refractory=refractory, method='linear')
 
 syn_hidden1_hidden2 = Synapses(G_hidden1, G_hidden2, model='w : 1', on_pre='v_post += w')
-syn_hidden1_hidden2.connect(p=1.0)
+syn_hidden1_hidden2.connect(p=0.3)
 syn_hidden1_hidden2.w = '0.1 * rand()'
 
 syn_hidden2_output = Synapses(G_hidden2, G_output, model='w : 1', on_pre='v_post += w')
-syn_hidden2_output.connect(p=1.0)
+syn_hidden2_output.connect(p=0.3)
 syn_hidden2_output.w = '0.1 * rand()'
 
 spike_monitor_hidden = SpikeMonitor(G_hidden2)
 spike_monitor_output = SpikeMonitor(G_output)
 state_monitor_hidden = StateMonitor(G_hidden2, 'v', record=True)
+
+syn_inhib = Synapses(G_output, G_output, on_pre='v_post -= 0.2')
+syn_inhib.connect(condition='i != j')
+net.add(syn_inhib)
 
 net = Network()
 net.add(G_hidden1, G_hidden2, G_output,
@@ -146,6 +150,7 @@ for epoch in range(num_epochs):
         net.add(syn_in_hidden1)
 
         net.run(100 * ms)
+
         previous_weights = syn_in_hidden1.w[:]
         print(f"  Trained on image {idx + 1}/{num_train} in epoch {epoch + 1}")
 
@@ -178,6 +183,7 @@ for idx, (img, true_label) in enumerate(zip(test_images, test_labels)):
 
     spike_counts = np.array([(spike_monitor_output.i == neur).sum() for neur in range(N_output)])
     pred_label = spike_counts.argmax()
+
     y_true.append(true_label)
     y_pred.append(pred_label)
 
