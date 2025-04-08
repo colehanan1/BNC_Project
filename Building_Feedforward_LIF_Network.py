@@ -9,6 +9,7 @@ from skimage.color import rgb2gray
 import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.metrics import confusion_matrix
+from collections import Counter
 
 clip = np.clip
 
@@ -208,3 +209,42 @@ plt.plot(state_monitor_hidden.t / ms, state_monitor_hidden.v[neuron_idx])
 plt.xlabel("Time (ms)")
 plt.ylabel("Membrane Potential (v)")
 plt.show()
+
+print("\nOutput neuron firing activity (last test image):")
+for i in range(N_output):
+    count = (spike_monitor_output.i == i).sum()
+    print(f"Output neuron {i} fired {count} times")
+
+# Hidden neuron firing rate histogram
+firing_counts = Counter(spike_monitor_hidden.i)
+heatmap_data = np.zeros(N_hidden2)
+for neuron_idx, count in firing_counts.items():
+    heatmap_data[neuron_idx] = count
+
+plt.figure(figsize=(12, 3))
+plt.title("Hidden Neuron Firing Rates")
+plt.bar(range(N_hidden2), heatmap_data)
+plt.xlabel("Neuron Index")
+plt.ylabel("Spikes")
+plt.show()
+
+# Raster plot of output neuron spikes
+plt.figure()
+plt.title("Output Neuron Spikes (Last Test Image)")
+plt.plot(spike_monitor_output.t / ms, spike_monitor_output.i, 'r.')
+plt.xlabel("Time (ms)")
+plt.ylabel("Output Neuron Index")
+plt.show()
+
+# Show spike count vector for last sample
+print(f"\nLast Test Image: Output Spike Counts = {spike_counts}, Predicted = {pred_label}, True = {true_label}")
+
+# Visualize STDP weight matrix
+if previous_weights is not None:
+    weight_matrix = np.array(previous_weights).reshape((N_input, N_hidden1))[:100, :100]  # preview 100x100 block
+    plt.figure(figsize=(6, 5))
+    sns.heatmap(weight_matrix, cmap='viridis')
+    plt.title("Input-to-Hidden Synaptic Weights (STDP)")
+    plt.xlabel("Hidden Neuron")
+    plt.ylabel("Input Neuron")
+    plt.show()
