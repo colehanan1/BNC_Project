@@ -1,11 +1,12 @@
 from brian2 import *  # Brian2 for SNN simulation
 from brian2 import prefs
+from skimage.filters import gabor
+from skimage.color import rgb2gray
 
 prefs.codegen.target = "numpy"  # Use numpy code generation to avoid clang/Cython issues
 
 import numpy as np
 from tensorflow.keras.datasets import cifar10
-from scipy.ndimage import gaussian_filter
 import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.metrics import confusion_matrix
@@ -34,29 +35,25 @@ test_labels = y_test[:num_test]
 # ---------------------------
 # Helper Functions
 # ---------------------------
-def encode_image_to_spikes(image_color, T_max=100.0, threshold=0.1,
-                           sigma_small=1.0, sigma_large=3.0):
+def encode_image_to_spikes(image_color, T_max=100.0, threshold=0.3,
+                           frequency=0.3, orientations=16):
     """
-    Convert a CIFAR-10 color image into spike times using DoG filtering and latency coding.
-    Returns:
-      spike_times: 2D array of spike times (ms) with np.inf for no spike.
-      gray_image: the grayscale version of the image.
+    Encode a color image into spike times using a Gabor filter bank and latency coding.
     """
-    # Convert color image to grayscale using luminance formula.
-    image = np.dot(image_color[..., :3], [0.299, 0.587, 0.114])
-    image = image.astype(float) / 255.0  # normalize to [0,1]
+    image = rgb2gray(image_color.astype(float) / 255.0)
 
-    # Apply Difference-of-Gaussians filtering.
-    blur_small = gaussian_filter(image, sigma=sigma_small)
-    blur_large = gaussian_filter(image, sigma=sigma_large)
-    dog = blur_small - blur_large
+    # Apply Gabor filters with different orientations
+    gabor_sum = np.zeros_like(image)
+    for theta in np.linspace(0, np.pi, orientations, endpoint=False):
+        filt_real, _ = gabor(image, frequency=frequency, theta=theta)
+        gabor_sum += filt_real  # sum responses across orientations
 
-    # Normalize DoG result to [0, 1]
-    dog_norm = (dog - dog.min()) / (dog.max() - dog.min() + 1e-8)
+    # Normalize to [0, 1]
+    gabor_norm = (gabor_sum - gabor_sum.min()) / (gabor_sum.max() - gabor_sum.min() + 1e-8)
 
-    # Compute spike times: higher intensity => earlier spike.
-    spike_times = T_max * (1.0 - dog_norm)
-    spike_times[dog_norm < threshold] = np.inf  # no spike if below threshold
+    # Latency coding: high activation → earlier spike
+    spike_times = T_max * (1.0 - gabor_norm)
+    spike_times[gabor_norm < threshold] = np.inf  # suppress weak spikes
     return spike_times, image
 
 
