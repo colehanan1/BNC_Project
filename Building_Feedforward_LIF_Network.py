@@ -150,9 +150,6 @@ for epoch in range(num_epochs):
 
 print("Training complete.")
 
-# ---------------------------
-# Evaluation loop
-# ---------------------------
 print("Starting evaluation...")
 y_true = []
 y_pred = []
@@ -160,33 +157,24 @@ y_pred = []
 for idx, (img, true_label) in enumerate(zip(test_images, test_labels)):
     spike_times, _ = encode_image_to_spikes(img)
     input_indices, input_times = spikes_from_array(spike_times)
-    current_offset = float(defaultclock.t / ms)  # current time in ms
+    current_offset = float(defaultclock.t / ms)
     shifted_input_times = [(t + current_offset) * ms for t in input_times]
 
-    # Remove old input group and create a new one.
-    try:
-        net.remove(G_input)
-    except Exception:
-        pass
+    try: net.remove(G_input)
+    except: pass
     G_input = SpikeGeneratorGroup(N_input, input_indices, shifted_input_times)
     net.add(G_input)
 
-    # Re-create synapses from input to hidden using the stored weights.
-    try:
-        net.remove(syn_in_hidden)
-    except Exception:
-        pass
-    syn_in_hidden = Synapses(G_input, G_hidden, model=stdp_model,
-                             on_pre=stdp_on_pre, on_post=stdp_on_post)
-    syn_in_hidden.connect(p=1.0)
-    syn_in_hidden.w = previous_weights  # use the trained weights
-    net.add(syn_in_hidden)
+    try: net.remove(syn_in_hidden1)
+    except: pass
+    syn_in_hidden1 = Synapses(G_input, G_hidden1, model=stdp_model,
+                              on_pre=stdp_on_pre, on_post=stdp_on_post)
+    syn_in_hidden1.connect(p=1.0)
+    syn_in_hidden1.w = previous_weights
+    net.add(syn_in_hidden1)
 
-    # Run simulation for this test image.
     net.run(100 * ms)
-    # No need to reset the clock since we already shift spike times.
 
-    # Count output spikes to decide the predicted label.
     spike_counts = np.array([(spike_monitor_output.i == neur).sum() for neur in range(N_output)])
     pred_label = spike_counts.argmax()
     y_true.append(true_label)
@@ -194,7 +182,6 @@ for idx, (img, true_label) in enumerate(zip(test_images, test_labels)):
 
     print(f"  Evaluated test image {idx + 1}/{num_test}")
 
-# Compute and display the confusion matrix.
 cm = confusion_matrix(y_true, y_pred)
 print("Confusion Matrix:")
 print(cm)
@@ -207,9 +194,6 @@ plt.ylabel("True Label")
 plt.title("Confusion Matrix")
 plt.show()
 
-# ---------------------------
-# Additional Visualizations
-# ---------------------------
 plt.figure()
 plt.title("Hidden Layer Spikes (Last Test Image)")
 plt.plot(spike_monitor_hidden.t / ms, spike_monitor_hidden.i, 'k.')
