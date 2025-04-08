@@ -18,8 +18,8 @@ y_test = y_test.flatten()
 class_names = ['airplane', 'automobile', 'bird', 'cat', 'deer',
                'dog', 'frog', 'horse', 'ship', 'truck']
 
-num_train = 50
-num_test = 20
+num_train = 50,000
+num_test = 10,000
 training_images = x_train[:num_train]
 training_labels = y_train[:num_train]
 test_images = x_test[:num_test]
@@ -40,8 +40,9 @@ def poisson_encode_image(image_color, duration=100, max_rate=100):
             spikes.append((neuron_idx, t))
     return spikes, image
 
-tau_pre = 20 * ms
-tau_post = 20 * ms
+# Adjusted temporal window for STDP
+tau_pre = 40 * ms
+tau_post = 40 * ms
 A_pre = 0.02
 A_post = -0.03
 w_max = 1.0
@@ -63,6 +64,25 @@ post += A_post
 w = clip(w + pre, 0, w_max)
 '''
 
+# R-STDP for output layer
+reward_signal = TimedArray([0.0], dt=1*ms)
+
+rstdp_model = '''
+w : 1
+dpre/dt = -pre/tau_pre : 1 (event-driven)
+dpost/dt = -post/tau_post : 1 (event-driven)
+'''
+
+rstdp_on_pre = '''
+v_post += w
+pre += A_pre
+'''
+
+rstdp_on_post = '''
+post += A_post
+w = clip(w + reward_signal(t) * pre, 0, w_max)
+'''
+
 H_img, W_img = 32, 32
 N_input = H_img * W_img
 N_hidden1 = 500
@@ -78,7 +98,7 @@ eqs = '''
 dv/dt = -v/tau : 1 (unless refractory)
 '''
 
-G_input = SpikeGeneratorGroup(N_input, [], [] * ms)  # correct: ensures time has units
+G_input = SpikeGeneratorGroup(N_input, [], [] * ms)
 G_hidden1 = NeuronGroup(N_hidden1, eqs, threshold='v > V_th', reset='v = V_reset',
                         refractory=refractory, method='linear')
 G_hidden2 = NeuronGroup(N_hidden2, eqs, threshold='v > V_th', reset='v = V_reset',
@@ -95,7 +115,9 @@ syn_hidden1_hidden2 = Synapses(G_hidden1, G_hidden2, model='w : 1', on_pre='v_po
 syn_hidden1_hidden2.connect(p=0.2)
 syn_hidden1_hidden2.w = '0.01 * rand()'
 
-syn_hidden2_output = Synapses(G_hidden2, G_output, model='w : 1', on_pre='v_post += w')
+# R-STDP version of hidden2->output
+syn_hidden2_output = Synapses(G_hidden2, G_output, model=rstdp_model,
+                              on_pre=rstdp_on_pre, on_post=rstdp_on_post)
 syn_hidden2_output.connect(p=0.2)
 syn_hidden2_output.w = '0.01 * rand()'
 
@@ -115,7 +137,7 @@ net.add(G_input, G_hidden1, G_hidden2, G_output,
         lateral_inhib_h2, syn_inhib,
         spike_monitor_hidden, spike_monitor_output, state_monitor_hidden)
 
-num_epochs = 2
+num_epochs = 10
 
 print("Starting training...")
 
@@ -124,20 +146,43 @@ for epoch in range(num_epochs):
     for idx, (img, label) in enumerate(zip(training_images, training_labels)):
         spikes, _ = poisson_encode_image(img)
         input_indices = [s[0] for s in spikes]
-        input_times = [s[1] * ms for s in spikes]
+        input_times = [s[1] for s in spikes]
 
-        G_input.set_spikes(input_indices, input_times)
+        current_offset = float(defaultclock.t / ms)
+        shifted_times = [(t + current_offset) * ms for t in input_times]
+        G_input.set_spikes(input_indices, shifted_times)
 
         G_hidden1.v = 0
         G_hidden2.v = 0
         G_output.v = 0
 
         net.run(100 * ms)
+
+        spike_counts = np.array([(spike_monitor_output.i == neur).sum() for neur in range(N_output)])
+        pred_label = spike_counts.argmax()
+
+        # Assign reward based on correctness
+        reward_val = 1.0 if pred_label == label else -1.0
+        reward_signal.values = np.full_like(reward_signal.values, reward_val)
+
         print(f"  Trained on image {idx + 1}/{num_train} in epoch {epoch + 1}")
 
+sum_weights = np.sum(syn_in_hidden1.w[:])
+if sum_weights > 0:
+    syn_in_hidden1.w[:] = syn_in_hidden1.w[:] / sum_weights * w_max
+
 previous_weights = syn_in_hidden1.w[:]
+
+# Reshape for visualization with error handling
+weight_vector = np.array(previous_weights)
+try:
+    weight_matrix = weight_vector.reshape((N_input, N_hidden1))[:100, :100]
+except ValueError:
+    print("Warning: Could not reshape weights into expected (N_input, N_hidden1) shape.")
+    weight_matrix = np.zeros((100, 100))
 print("Training complete.")
 
+# Evaluation block remains unchanged (optionally apply reward modulation during test too)
 y_true = []
 y_pred = []
 
