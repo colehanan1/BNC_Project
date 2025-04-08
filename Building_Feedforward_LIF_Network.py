@@ -78,12 +78,18 @@ eqs = '''
 dv/dt = -v/tau : 1 (unless refractory)
 '''
 
+G_input = SpikeGeneratorGroup(N_input, [], [] * ms)  # correct: ensures time has units
 G_hidden1 = NeuronGroup(N_hidden1, eqs, threshold='v > V_th', reset='v = V_reset',
                         refractory=refractory, method='linear')
 G_hidden2 = NeuronGroup(N_hidden2, eqs, threshold='v > V_th', reset='v = V_reset',
                         refractory=refractory, method='linear')
 G_output = NeuronGroup(N_output, eqs, threshold='v > V_th', reset='v = V_reset',
                        refractory=refractory, method='linear')
+
+syn_in_hidden1 = Synapses(G_input, G_hidden1, model=stdp_model,
+                          on_pre=stdp_on_pre, on_post=stdp_on_post)
+syn_in_hidden1.connect(p=0.2)
+syn_in_hidden1.w = '0.01 * rand()'
 
 syn_hidden1_hidden2 = Synapses(G_hidden1, G_hidden2, model='w : 1', on_pre='v_post += w')
 syn_hidden1_hidden2.connect(p=0.2)
@@ -93,11 +99,9 @@ syn_hidden2_output = Synapses(G_hidden2, G_output, model='w : 1', on_pre='v_post
 syn_hidden2_output.connect(p=0.2)
 syn_hidden2_output.w = '0.01 * rand()'
 
-# Lateral inhibition for hidden2 layer
 lateral_inhib_h2 = Synapses(G_hidden2, G_hidden2, on_pre='v_post -= 0.3')
 lateral_inhib_h2.connect(condition='i != j', p=0.1)
 
-# Inhibition for output layer
 syn_inhib = Synapses(G_output, G_output, on_pre='v_post -= 0.5')
 syn_inhib.connect(condition='i != j')
 
@@ -106,13 +110,12 @@ spike_monitor_output = SpikeMonitor(G_output)
 state_monitor_hidden = StateMonitor(G_hidden2, 'v', record=True)
 
 net = Network()
-net.add(G_hidden1, G_hidden2, G_output,
-        syn_hidden1_hidden2, syn_hidden2_output,
+net.add(G_input, G_hidden1, G_hidden2, G_output,
+        syn_in_hidden1, syn_hidden1_hidden2, syn_hidden2_output,
         lateral_inhib_h2, syn_inhib,
         spike_monitor_hidden, spike_monitor_output, state_monitor_hidden)
 
-num_epochs = 10
-previous_weights = None
+num_epochs = 2
 
 print("Starting training...")
 
@@ -123,27 +126,16 @@ for epoch in range(num_epochs):
         input_indices = [s[0] for s in spikes]
         input_times = [s[1] * ms for s in spikes]
 
-        try: net.remove(G_input)
-        except: pass
-        G_input = SpikeGeneratorGroup(N_input, input_indices, input_times)
-        net.add(G_input)
-
-        try: net.remove(syn_in_hidden1)
-        except: pass
-        syn_in_hidden1 = Synapses(G_input, G_hidden1, model=stdp_model,
-                                  on_pre=stdp_on_pre, on_post=stdp_on_post)
-        syn_in_hidden1.connect(p=0.2)
-        syn_in_hidden1.w = previous_weights if previous_weights is not None else '0.01 * rand()'
-        net.add(syn_in_hidden1)
+        G_input.set_spikes(input_indices, input_times)
 
         G_hidden1.v = 0
         G_hidden2.v = 0
         G_output.v = 0
 
         net.run(100 * ms)
-        previous_weights = syn_in_hidden1.w[:]
         print(f"  Trained on image {idx + 1}/{num_train} in epoch {epoch + 1}")
 
+previous_weights = syn_in_hidden1.w[:]
 print("Training complete.")
 
 y_true = []
@@ -156,18 +148,7 @@ for idx, (img, true_label) in enumerate(zip(test_images, test_labels)):
     input_indices = [s[0] for s in spikes]
     input_times = [s[1] * ms for s in spikes]
 
-    try: net.remove(G_input)
-    except: pass
-    G_input = SpikeGeneratorGroup(N_input, input_indices, input_times)
-    net.add(G_input)
-
-    try: net.remove(syn_in_hidden1)
-    except: pass
-    syn_in_hidden1 = Synapses(G_input, G_hidden1, model=stdp_model,
-                              on_pre=stdp_on_pre, on_post=stdp_on_post)
-    syn_in_hidden1.connect(p=0.2)
-    syn_in_hidden1.w = previous_weights
-    net.add(syn_in_hidden1)
+    G_input.set_spikes(input_indices, input_times)
 
     G_hidden1.v = 0
     G_hidden2.v = 0
