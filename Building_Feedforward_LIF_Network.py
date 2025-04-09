@@ -1,6 +1,6 @@
 from brian2 import *
 from brian2 import prefs
-prefs.codegen.target = "numpy"
+prefs.codegen.target = 'numpy'
 
 import numpy as np
 from tensorflow.keras.datasets import cifar10
@@ -19,8 +19,8 @@ class_names = ['airplane', 'automobile', 'bird', 'cat', 'deer',
                'dog', 'frog', 'horse', 'ship', 'truck']
 
 # Full CIFAR-10 dataset for more robust training
-num_train = 50000
-num_test = 10000
+num_train = 5000
+num_test = 1000
 training_images = x_train[:num_train].copy()
 training_labels = y_train[:num_train].copy()
 test_images = x_test[:num_test].copy()
@@ -138,7 +138,7 @@ net.add(G_input, G_hidden1, G_hidden2, G_output,
         lateral_inhib_h2, syn_inhib,
         spike_monitor_hidden, spike_monitor_output, state_monitor_hidden)
 
-num_epochs = 10
+num_epochs = 1
 
 print("Starting training...")
 
@@ -158,7 +158,7 @@ for epoch in range(num_epochs):
         G_output.v = 0
 
         # Increased simulation time to 200ms for better spike integration
-        net.run(200 * ms)
+        net.run(200 * ms, report='text')
 
         spike_counts = np.array([(spike_monitor_output.i == neur).sum() for neur in range(N_output)])
         pred_label = spike_counts.argmax()
@@ -182,9 +182,66 @@ try:
 except ValueError:
     print("Warning: Could not reshape weights into expected (N_input, N_hidden1) shape.")
     weight_matrix = np.zeros((100, 100))
-print("Training complete.")
 
 # Evaluation block with reward modulation during test
+
+# =====================
+# Epoch-level accuracy tracking (automated testing)
+# =====================
+training_accuracies = []
+
+print("Starting evaluation...")
+y_true = []
+y_pred = []
+
+for idx, (img, label) in enumerate(zip(test_images[:1000], test_labels[:1000])):
+    spikes, _ = poisson_encode_image(img)
+    input_indices = [s[0] for s in spikes]
+    input_times = [s[1] for s in spikes]
+
+    current_offset = float(defaultclock.t / ms)
+    shifted_times = [(t + current_offset) * ms for t in input_times]
+    G_input.set_spikes(input_indices, shifted_times)
+
+    G_hidden1.v = 0
+    G_hidden2.v = 0
+    G_output.v = 0
+
+    net.run(200 * ms)
+
+    spike_counts = np.array([(spike_monitor_output.i == neur).sum() for neur in range(N_output)])
+    pred_label = spike_counts.argmax()
+    y_true.append(label)
+    y_pred.append(pred_label)
+
+    # Apply reward modulation during test as well
+    reward_val = 1.0 if pred_label == label else -1.0
+    reward_signal.values = np.full_like(reward_signal.values, reward_val)
+
+    if idx % 100 == 0:
+        print(f"  Evaluated test image {idx + 1}/1000")
+
+accuracy = np.mean(np.array(y_true) == np.array(y_pred))
+training_accuracies.append(accuracy)
+print(f"Accuracy after epoch: {accuracy*100:.2f}%")
+
+# =====================
+# Accuracy vs Epoch Plot
+# =====================
+plt.figure()
+plt.plot(range(1, len(training_accuracies)+1), training_accuracies, marker='o')
+plt.title("Training Accuracy over Epochs")
+plt.xlabel("Epoch")
+plt.ylabel("Accuracy")
+plt.grid(True)
+plt.show()
+
+# =====================
+# Ideas for future improvements:
+# - Add recurrent connections to G_hidden2 or G_output to enhance memory.
+# - Use SNN as a feature extractor and train an SVM/linear classifier on firing rates.
+# - Monitor and adjust lateral inhibition or neuron thresholds to improve diversity in neuron firing.
+# =====================
 print("Starting evaluation...")
 y_true = []
 y_pred = []
