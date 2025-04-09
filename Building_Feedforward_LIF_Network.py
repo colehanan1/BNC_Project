@@ -19,8 +19,8 @@ class_names = ['airplane', 'automobile', 'bird', 'cat', 'deer',
                'dog', 'frog', 'horse', 'ship', 'truck']
 
 # Full CIFAR-10 dataset for more robust training
-num_train = 5000
-num_test = 1000
+num_train = 10000
+num_test = 2000
 training_images = x_train[:num_train].copy()
 training_labels = y_train[:num_train].copy()
 test_images = x_test[:num_test].copy()
