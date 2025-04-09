@@ -13,6 +13,7 @@ from collections import Counter
 import gc  # Import garbage collection to clear memory
 
 clip = np.clip
+batch_size = 128
 
 # Load CIFAR-10 data and prepare labels
 (x_train, y_train), (x_test, y_test) = cifar10.load_data()
@@ -28,6 +29,7 @@ training_images = x_train[:num_train]
 training_labels = y_train[:num_train]
 test_images = x_test[:num_test]
 test_labels = y_test[:num_test]
+num_batches = num_train // batch_size
 
 def encode_image_to_spikes(image_color, T_max=100.0, threshold=0.5,
                            frequency=0.3, orientations=8):
@@ -142,92 +144,48 @@ print("Starting training...")
 # Training loop
 for epoch in range(num_epochs):
     print(f"Epoch {epoch + 1}")
-    for idx, (img, label) in enumerate(zip(training_images, training_labels)):
-        spike_times, _ = encode_image_to_spikes(img)
-        input_indices, input_times = spikes_from_array(spike_times)
-        current_offset = float(defaultclock.t / ms)
-        shifted_input_times = [(t + current_offset) * ms for t in input_times]
+    for batch_idx in range(num_batches):
+        batch_start = batch_idx * batch_size
+        batch_end = batch_start + batch_size
+        batch_images = training_images[batch_start:batch_end]
+        batch_labels = training_labels[batch_start:batch_end]
 
-        # Remove previous input group if exists
-        try:
-            net.remove(G_input)
-        except Exception as e:
-            pass
-        G_input = SpikeGeneratorGroup(N_input, input_indices, shifted_input_times)
-        net.add(G_input)
+        # Process each image in the batch
+        for idx, (img, label) in enumerate(zip(batch_images, batch_labels)):
+            spike_times, _ = encode_image_to_spikes(img)
+            input_indices, input_times = spikes_from_array(spike_times)
+            current_offset = float(defaultclock.t / ms)
+            shifted_input_times = [(t + current_offset) * ms for t in input_times]
 
-        # Remove previous synapse group if exists
-        try:
-            net.remove(syn_in_hidden1)
-        except Exception as e:
-            pass
-        syn_in_hidden1 = Synapses(G_input, G_hidden1, model=stdp_model,
-                                  on_pre=stdp_on_pre, on_post=stdp_on_post)
-        syn_in_hidden1.connect(p=1.0)
-        if previous_weights is not None:
-            syn_in_hidden1.w = previous_weights
-        else:
-            syn_in_hidden1.w = '0.1 * rand()'
-        net.add(syn_in_hidden1)
-
-        # Run simulation for the current image
-        net.run(100 * ms)
-
-        previous_weights = syn_in_hidden1.w[:]  # Save weights for next iteration
-        print(f"  Trained on image {idx + 1}/{num_train} in epoch {epoch + 1}")
-
-        # Clear memory every 100 images
-        if (idx + 1) % 100 == 0:
+            # Remove previous input group if exists
             try:
                 net.remove(G_input)
+            except Exception as e:
+                pass
+            G_input = SpikeGeneratorGroup(N_input, input_indices, shifted_input_times)
+            net.add(G_input)
+
+            # Remove previous synapse group if exists
+            try:
                 net.remove(syn_in_hidden1)
             except Exception as e:
                 pass
-            del G_input, syn_in_hidden1
-            gc.collect()
-            print(f"Memory cleared after processing {idx + 1} images in epoch {epoch + 1}")
+            syn_in_hidden1 = Synapses(G_input, G_hidden1, model=stdp_model,
+                                      on_pre=stdp_on_pre, on_post=stdp_on_post)
+            syn_in_hidden1.connect(p=1.0)
+            if previous_weights is not None:
+                syn_in_hidden1.w = previous_weights
+            else:
+                syn_in_hidden1.w = '0.1 * rand()'
+            net.add(syn_in_hidden1)
 
-print("Training complete.")
+            # Run simulation for the current image
+            net.run(100 * ms)
 
-print("Starting evaluation...")
-y_true = []
-y_pred = []
+            previous_weights = syn_in_hidden1.w[:]  # Save weights for next iteration
+            print(f"  Trained on image {batch_start + idx + 1}/{num_train} in epoch {epoch + 1}")
 
-for idx, (img, true_label) in enumerate(zip(test_images, test_labels)):
-    spike_times, _ = encode_image_to_spikes(img)
-    input_indices, input_times = spikes_from_array(spike_times)
-    current_offset = float(defaultclock.t / ms)
-    shifted_input_times = [(t + current_offset) * ms for t in input_times]
-
-    try:
-        net.remove(G_input)
-    except Exception as e:
-        pass
-    G_input = SpikeGeneratorGroup(N_input, input_indices, shifted_input_times)
-    net.add(G_input)
-
-    try:
-        net.remove(syn_in_hidden1)
-    except Exception as e:
-        pass
-    syn_in_hidden1 = Synapses(G_input, G_hidden1, model=stdp_model,
-                              on_pre=stdp_on_pre, on_post=stdp_on_post)
-    syn_in_hidden1.connect(p=1.0)
-    syn_in_hidden1.w = previous_weights
-    net.add(syn_in_hidden1)
-
-    net.run(100 * ms)
-
-    spike_counts = np.array([(spike_monitor_output.i == neur).sum() for neur in range(N_output)])
-    pred_label = spike_counts.argmax()
-
-    y_true.append(true_label)
-    y_pred.append(pred_label)
-
-    print(f"  Evaluated test image {idx + 1}/{num_test}")
-
-    # Clear memory every 100 evaluation images
-    if (idx + 1) % 100 == 0:
+        # Clear memory after each batch
         try:
             net.remove(G_input)
             net.remove(syn_in_hidden1)
@@ -235,7 +193,64 @@ for idx, (img, true_label) in enumerate(zip(test_images, test_labels)):
             pass
         del G_input, syn_in_hidden1
         gc.collect()
-        print(f"Memory cleared after evaluating {idx + 1} images")
+        print(f"Memory cleared after processing batch {batch_idx + 1}/{num_batches} in epoch {epoch + 1}")
+
+print("Training complete.")
+
+num_test_batches = num_test // batch_size
+
+print("Starting evaluation...")
+y_true = []
+y_pred = []
+
+for batch_idx in range(num_test_batches):
+    batch_start = batch_idx * batch_size
+    batch_end = batch_start + batch_size
+    batch_images = test_images[batch_start:batch_end]
+    batch_labels = test_labels[batch_start:batch_end]
+
+    for idx, (img, true_label) in enumerate(zip(batch_images, batch_labels)):
+        spike_times, _ = encode_image_to_spikes(img)
+        input_indices, input_times = spikes_from_array(spike_times)
+        current_offset = float(defaultclock.t / ms)
+        shifted_input_times = [(t + current_offset) * ms for t in input_times]
+
+        try:
+            net.remove(G_input)
+        except Exception as e:
+            pass
+        G_input = SpikeGeneratorGroup(N_input, input_indices, shifted_input_times)
+        net.add(G_input)
+
+        try:
+            net.remove(syn_in_hidden1)
+        except Exception as e:
+            pass
+        syn_in_hidden1 = Synapses(G_input, G_hidden1, model=stdp_model,
+                                  on_pre=stdp_on_pre, on_post=stdp_on_post)
+        syn_in_hidden1.connect(p=1.0)
+        syn_in_hidden1.w = previous_weights
+        net.add(syn_in_hidden1)
+
+        net.run(100 * ms)
+
+        spike_counts = np.array([(spike_monitor_output.i == neur).sum() for neur in range(N_output)])
+        pred_label = spike_counts.argmax()
+
+        y_true.append(true_label)
+        y_pred.append(pred_label)
+
+        print(f"  Evaluated test image {batch_start + idx + 1}/{num_test}")
+
+    # Clear memory after each batch
+    try:
+        net.remove(G_input)
+        net.remove(syn_in_hidden1)
+    except Exception as e:
+        pass
+    del G_input, syn_in_hidden1
+    gc.collect()
+    print(f"Memory cleared after evaluating batch {batch_idx + 1}/{num_test_batches}")
 
 # Create and display the confusion matrix
 cm = confusion_matrix(y_true, y_pred)
