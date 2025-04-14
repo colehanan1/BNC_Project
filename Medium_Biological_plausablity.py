@@ -221,7 +221,6 @@ def unsupervised_training_batched(train_dataset, n_neurons=100, num_epochs=1, T=
 
             if batch_idx % 50 == 0:
                 print(f"  Processed batch {batch_idx}/{len(dataloader)}")
-
         avg_spikes = epoch_spike_sum / (num_batches * B)
         weight_norm = torch.norm(layer.weights).item() / (n_neurons * input_size)
         epoch_duration = time.time() - epoch_start_time
