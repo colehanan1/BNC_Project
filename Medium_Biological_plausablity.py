@@ -147,6 +147,24 @@ class LIFNeuronLayer:
         self.last_post_spike[mask] = t
         return spikes
 
+    def reset(self):
+        """Reset membrane potentials and last spike times for a single sample."""
+        self.reset_batch(1)
+
+    def forward(self, input_spikes, t):
+        """
+        Single-sample forward pass using the batch method.
+
+        Args:
+            input_spikes (torch.Tensor): Tensor of shape (input_size,).
+            t (int): Current simulation time step.
+
+        Returns:
+            torch.Tensor: Output spike vector of shape (n_neurons,).
+        """
+        # Add a batch dimension, call the batched forward, and remove the batch dimension.
+        return self.forward_batch(input_spikes.unsqueeze(0), t).squeeze(0)
+
     def update_stdp_batch(self, input_spikes, spikes, t):
         """
         A simplified vectorized STDP update for a batch.
@@ -246,17 +264,24 @@ def extract_features(dataset, layer, T=T, dt=dt, max_rate=max_rate, device=devic
         features: Tensor of shape (num_images, n_neurons)
         labels: Tensor of shape (num_images,)
     """
-    layer.eval = True
     feature_list = []
     label_list = []
     num_steps = int(T / dt)
     for img, label in dataset:
-        img = img.squeeze().to(device)
+        img = img.to(device)
+        # Ensure image is 2D with shape (28, 28)
+        # If the image has a channel dimension (shape (1,28,28)), remove it.
+        if img.dim() == 3:
+            img = img.squeeze(0)
+        # Force the image to be 28x28:
+        img = img.view(28, 28)
+
+        # Now use your Poisson encoder (which will flatten the image to 784,)
         spike_train = poisson_encode_batch(img, T, max_rate, dt, device)
-        layer.reset()
+        layer.reset()  # reset for this sample
         output_spike_count = torch.zeros(layer.n_neurons, device=device)
         for t in range(num_steps):
-            input_spikes = spike_train[:, t]
+            input_spikes = spike_train[:, t]  # Expected shape: (784,)
             spikes = layer.forward(input_spikes, t)
             output_spike_count += spikes
         feature_list.append(output_spike_count.cpu())
@@ -264,7 +289,6 @@ def extract_features(dataset, layer, T=T, dt=dt, max_rate=max_rate, device=devic
     features = torch.stack(feature_list)
     labels = torch.tensor(label_list)
     return features, labels
-
 
 # -------------------------------
 # Supervised Training Phase (Linear Readout)
@@ -278,7 +302,7 @@ class LinearClassifier(nn.Module):
         return self.fc(x)
 
 
-def supervised_training(features, labels, num_epochs=20, lr=0.01):
+def supervised_training(features, labels, num_epochs=1, lr=0.01):
     """
     Train a simple linear classifier on the extracted features.
 
@@ -394,7 +418,7 @@ if __name__ == "__main__":
 
     # --- Phase 1: Unsupervised Training (STDP) ---
     n_unsupervised_neurons = 100  # Increase number of neurons for a richer feature set.
-    unsup_epochs = 10  # Increase as needed for your experiment.
+    unsup_epochs = 1  # Increase as needed for your experiment.
     start_time = time.time()
     unsup_layer = unsupervised_training_batched(train_dataset, n_neurons=n_unsupervised_neurons,
                                                 num_epochs=unsup_epochs, T=T,
@@ -414,7 +438,7 @@ if __name__ == "__main__":
     print(f"Extracted feature shape: {test_features.shape}")
 
     # --- Phase 3: Supervised Training of the Linear Classifier ---
-    sup_epochs = 20
+    sup_epochs = 1
     lr = 0.01
     print("\nTraining supervised read-out (linear classifier) on extracted features...")
     classifier = supervised_training(train_features, train_labels, num_epochs=sup_epochs, lr=lr)
