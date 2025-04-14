@@ -1,52 +1,142 @@
-import numpy as np
-from scipy.ndimage import gaussian_filter
-from tensorflow.keras.datasets import cifar10
+import os
+os.environ['PYTORCH_MPS_HIGH_WATERMARK_RATIO'] = '0.0'
+import torch
+import torch.nn as nn
+import torchvision
+import torchvision.transforms as transforms
+import norse.torch as norse
 import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.metrics import confusion_matrix
+import numpy as np
 
-# 1. Download and load the CIFAR-10 dataset.
-# This automatically downloads the dataset if it isn’t already available locally.
-(x_train, y_train), (x_test, y_test) = cifar10.load_data()
+if torch.backends.mps.is_available():
+    device = torch.device("mps")
+    print("MPS backend is available. Using Apple GPU.")
+else:
+    device = torch.device("cpu")
+    print("MPS backend not available. Using CPU.")
 
-# 2. Select an example color image from the training set.
-# CIFAR-10 images are 32x32 with 3 channels (RGB) and pixel values in [0, 255].
-image_color = x_train[0]
+# Hyperparameters
+num_epochs = 10
+batch_size = 64
+learning_rate = 1e-3
 
-# 3. Convert the color image to grayscale.
-# We use the standard luminance formula: Y = 0.299 R + 0.587 G + 0.114 B.
-image = np.dot(image_color[..., :3], [0.299, 0.587, 0.114])
-image = image.astype(float) / 255.0  # Normalize the grayscale image to [0, 1].
+# CIFAR-10 dataset
+transform = transforms.Compose([
+    transforms.ToTensor(),
+    transforms.Grayscale(),  # Convert to grayscale
+    transforms.Normalize((0.5,), (0.5,))
+])
 
-# Optional: Visualize the grayscale image.
-plt.imshow(image, cmap='gray')
-plt.title("Grayscale CIFAR-10 Image")
-plt.axis('off')
+train_dataset = torchvision.datasets.CIFAR10(root='./data',
+                                             train=True,
+                                             transform=transform,
+                                             download=True)
+
+test_dataset = torchvision.datasets.CIFAR10(root='./data',
+                                            train=False,
+                                            transform=transform,
+                                            download=True)
+
+train_loader = torch.utils.data.DataLoader(dataset=train_dataset,
+                                           batch_size=batch_size,
+                                           shuffle=True)
+
+test_loader = torch.utils.data.DataLoader(dataset=test_dataset,
+                                          batch_size=batch_size,
+                                          shuffle=False)
+
+# Define the spiking neural network
+class SNNModel(nn.Module):
+    def __init__(self):
+        super(SNNModel, self).__init__()
+        self.conv1 = nn.Conv2d(1, 32, kernel_size=3, padding=1)
+        self.lif1 = norse.LIFCell()
+        self.conv2 = nn.Conv2d(32, 64, kernel_size=3, padding=1)
+        self.lif2 = norse.LIFCell()
+        self.pool = nn.AvgPool2d(2)
+        self.fc1 = nn.Linear(64 * 16 * 16, 100)
+        self.lif3 = norse.LIFCell()
+        self.fc2 = nn.Linear(100, 10)
+        self.lif4 = norse.LIFCell()
+
+    def forward(self, x):
+        seq_length = 100  # Simulation time steps
+        batch_size = x.size(0)
+
+        # Initialize states using a dummy input tensor
+        dummy_input1 = torch.zeros(batch_size, 32, 32, 32, device=x.device)
+        dummy_input2 = torch.zeros(batch_size, 64, 32, 32, device=x.device)
+        dummy_input3 = torch.zeros(batch_size, 100, device=x.device)
+        dummy_input4 = torch.zeros(batch_size, 10, device=x.device)
+
+        mem1 = self.lif1.initial_state(dummy_input1)
+        mem2 = self.lif2.initial_state(dummy_input2)
+        mem3 = self.lif3.initial_state(dummy_input3)
+        mem4 = self.lif4.initial_state(dummy_input4)
+
+        spk_out = torch.zeros(batch_size, 10, device=x.device)
+
+        for t in range(seq_length):
+            z = self.conv1(x)
+            z, mem1 = self.lif1(z, mem1)
+            z = self.conv2(z)
+            z, mem2 = self.lif2(z, mem2)
+            z = self.pool(z)
+            z = z.view(batch_size, -1)
+            z = self.fc1(z)
+            z, mem3 = self.lif3(z, mem3)
+            z = self.fc2(z)
+            z, mem4 = self.lif4(z, mem4)
+            spk_out += z
+
+        return spk_out / seq_length
+
+# Initialize the model and move it to the appropriate device
+model = SNNModel().to(device)
+
+# Loss and optimizer
+criterion = nn.CrossEntropyLoss()
+optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+
+# Training loop
+for epoch in range(num_epochs):
+    model.train()
+    for i, (images, labels) in enumerate(train_loader):
+        images = images.to(device)
+        labels = labels.to(device)
+
+        # Forward pass
+        outputs = model(images)
+        loss = criterion(outputs, labels)
+
+        # Backward and optimize
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        if (i+1) % 100 == 0:
+            print(f"Epoch [{epoch+1}/{num_epochs}], Step [{i+1}/{len(train_loader)}], Loss: {loss.item():.4f}")
+
+# Evaluation
+model.eval()
+all_preds = []
+all_labels = []
+with torch.no_grad():
+    for images, labels in test_loader:
+        images = images.to(device)
+        outputs = model(images)
+        _, predicted = torch.max(outputs.data, 1)
+        all_preds.extend(predicted.cpu().numpy())
+        all_labels.extend(labels.numpy())
+
+# Confusion matrix
+cm = confusion_matrix(all_labels, all_preds)
+plt.figure(figsize=(10,8))
+sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
+            yticklabels=train_dataset.classes)
+plt.xlabel('Predicted')
+plt.ylabel('True')
+plt.title('Confusion Matrix')
 plt.show()
-
-# 4. Apply Difference-of-Gaussians (DoG) filtering to extract edges/contrast.
-sigma_small = 1.0  # small Gaussian blur (pixels)
-sigma_large = 3.0  # larger Gaussian blur
-blur_small = gaussian_filter(image, sigma=sigma_small)
-blur_large = gaussian_filter(image, sigma=sigma_large)
-dog = blur_small - blur_large  # The DoG result highlights edges.
-
-# Optional: Visualize the DoG filtered image.
-plt.imshow(dog, cmap='gray')
-plt.title("Difference-of-Gaussians (DoG)")
-plt.axis('off')
-plt.show()
-
-# 5. Normalize the DoG feature map to the [0, 1] range.
-dog_norm = (dog - dog.min()) / (dog.max() - dog.min() + 1e-8)
-
-# 6. Encode the normalized DoG image into spike times (latency coding).
-T_max = 100.0  # Total simulation time window in milliseconds.
-# In latency coding, higher intensity leads to an earlier spike.
-spike_times = T_max * (1.0 - dog_norm)
-
-# Optionally, set a threshold to ignore very low-contrast areas (no spike if intensity is low).
-#spike_times[dog_norm < 0.1] = np.inf  # np.inf indicates no spike within the simulation window.
-
-# Output some details about the resulting spike_times.
-print("Spike times array shape:", spike_times.shape)
-print("Spike times (ms):")
-print(spike_times)
