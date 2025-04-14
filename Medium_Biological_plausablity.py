@@ -269,19 +269,23 @@ def extract_features(dataset, layer, T=T, dt=dt, max_rate=max_rate, device=devic
     num_steps = int(T / dt)
     for img, label in dataset:
         img = img.to(device)
-        # Ensure image is 2D with shape (28, 28)
-        # If the image has a channel dimension (shape (1,28,28)), remove it.
+        # Ensure image is 2D (28 x 28) for MNIST.
         if img.dim() == 3:
+            # Typical MNIST tensor from ToTensor() is (1, 28, 28); squeeze will yield (28,28)
             img = img.squeeze(0)
-        # Force the image to be 28x28:
-        img = img.view(28, 28)
+        # If img is 1D (e.g. shape: (28,)), then reshape to (28,28).
+        if img.dim() == 1:
+            img = img.view(28, 28)
 
-        # Now use your Poisson encoder (which will flatten the image to 784,)
-        spike_train = poisson_encode_batch(img, T, max_rate, dt, device)
-        layer.reset()  # reset for this sample
+        # Optional: double-check the shape (for debugging)
+        # print("Image shape after processing:", img.shape)
+
+        # Now the image should be (28,28)
+        spike_train = poisson_encode_batch(img, T, max_rate, dt, device)  # Expected shape: (784, T)
+        layer.reset()  # reset the layer for this sample
         output_spike_count = torch.zeros(layer.n_neurons, device=device)
         for t in range(num_steps):
-            input_spikes = spike_train[:, t]  # Expected shape: (784,)
+            input_spikes = spike_train[:, t]  # Now should be (784,)
             spikes = layer.forward(input_spikes, t)
             output_spike_count += spikes
         feature_list.append(output_spike_count.cpu())
