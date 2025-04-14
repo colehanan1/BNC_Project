@@ -64,6 +64,21 @@ def dog_filter(image, sigma1=1.0, sigma2=2.0):
     return filtered
 
 
+def poisson_encode(image, T, max_rate, dt, device):
+    """
+    Convert a normalized image (values in [0,1]) into a spike train using Poisson coding.
+    Expects image to be a 2D tensor of shape (H, W).
+
+    Returns:
+        torch.Tensor: Spike train of shape (H*W, T)
+    """
+    flat = image.view(-1)  # Flatten: shape (H*W,)
+    probability = flat * max_rate * dt / 1000.0  # (H*W,)
+    rand_vals = torch.rand(flat.size(0), T, device=device)
+    spike_train = (rand_vals < probability.unsqueeze(1)).float()
+    return spike_train
+
+
 def poisson_encode_batch(images, T, max_rate, dt, device):
     """
     Batch version of Poisson encoding with DoG filtering.
@@ -269,23 +284,19 @@ def extract_features(dataset, layer, T=T, dt=dt, max_rate=max_rate, device=devic
     num_steps = int(T / dt)
     for img, label in dataset:
         img = img.to(device)
-        # Ensure image is 2D (28 x 28) for MNIST.
+        # Ensure image is 2D: typically MNIST images come as (1,28,28)
         if img.dim() == 3:
-            # Typical MNIST tensor from ToTensor() is (1, 28, 28); squeeze will yield (28,28)
-            img = img.squeeze(0)
-        # If img is 1D (e.g. shape: (28,)), then reshape to (28,28).
+            img = img.squeeze(0)  # Now shape should be (28,28)
+        # If for any reason it is 1D (shape: (28,)), reshape it
         if img.dim() == 1:
             img = img.view(28, 28)
 
-        # Optional: double-check the shape (for debugging)
-        # print("Image shape after processing:", img.shape)
-
-        # Now the image should be (28,28)
-        spike_train = poisson_encode_batch(img, T, max_rate, dt, device)  # Expected shape: (784, T)
-        layer.reset()  # reset the layer for this sample
+        # Use the single-image Poisson encoder
+        spike_train = poisson_encode(img, T, max_rate, dt, device)  # Expects (784,T)
+        layer.reset()  # Reset the layer state for this sample
         output_spike_count = torch.zeros(layer.n_neurons, device=device)
         for t in range(num_steps):
-            input_spikes = spike_train[:, t]  # Now should be (784,)
+            input_spikes = spike_train[:, t]  # Now shape is (784,)
             spikes = layer.forward(input_spikes, t)
             output_spike_count += spikes
         feature_list.append(output_spike_count.cpu())
@@ -293,6 +304,7 @@ def extract_features(dataset, layer, T=T, dt=dt, max_rate=max_rate, device=devic
     features = torch.stack(feature_list)
     labels = torch.tensor(label_list)
     return features, labels
+
 
 # -------------------------------
 # Supervised Training Phase (Linear Readout)
