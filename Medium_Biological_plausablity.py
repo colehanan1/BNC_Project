@@ -11,7 +11,6 @@ dt = 1.0  # Time step (ms)
 num_steps = int(T / dt)
 max_rate = 100.0  # Maximum firing rate (Hz)
 
-
 # -------------------------------
 # Retina-Inspired Poisson Encoder
 # -------------------------------

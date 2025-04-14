@@ -11,7 +11,6 @@ from sklearn.metrics import confusion_matrix
 from collections import Counter
 
 clip = np.clip
-
 (x_train, y_train), (x_test, y_test) = cifar10.load_data()
 y_train = y_train.flatten()
 y_test = y_test.flatten()

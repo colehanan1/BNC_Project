@@ -77,7 +77,6 @@ if __name__ == '__main__':
     model = CNNModel().to(device)
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-
     print("Training CNN...")
     for epoch in range(50):  # 50 epochs
         running_loss = 0.0
