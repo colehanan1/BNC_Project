@@ -271,38 +271,53 @@ def unsupervised_training_batched(train_dataset, n_neurons=100, num_epochs=1, T=
 # -------------------------------
 # Feature Extraction from Unsupervised Layer
 # -------------------------------
-def extract_features(dataset, layer, T=T, dt=dt, max_rate=max_rate, device=device):
+def extract_features_batched(dataset, layer, T=T, dt=dt, max_rate=max_rate, device=device, batch_size=64):
     """
-    Extract spike count features from the unsupervised SNN for every image in a dataset.
+    Extract spike count features from the unsupervised SNN for every image in a dataset using batch processing.
+
+    Args:
+        dataset: A PyTorch dataset.
+        layer: Your LIFNeuronLayer instance.
+        T: Total simulation time per image (ms).
+        dt: Simulation time step (ms).
+        max_rate: Maximum firing rate used for Poisson encoding.
+        device: The torch device.
+        batch_size: Batch size.
 
     Returns:
         features: Tensor of shape (num_images, n_neurons)
         labels: Tensor of shape (num_images,)
     """
+    from torch.utils.data import DataLoader
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
     feature_list = []
     label_list = []
     num_steps = int(T / dt)
-    for img, label in dataset:
-        img = img.to(device)
-        # Ensure image is 2D: typically MNIST images come as (1,28,28)
-        if img.dim() == 3:
-            img = img.squeeze(0)  # Now shape should be (28,28)
-        # If for any reason it is 1D (shape: (28,)), reshape it
-        if img.dim() == 1:
-            img = img.view(28, 28)
 
-        # Use the single-image Poisson encoder
-        spike_train = poisson_encode(img, T, max_rate, dt, device)  # Expects (784,T)
-        layer.reset()  # Reset the layer state for this sample
-        output_spike_count = torch.zeros(layer.n_neurons, device=device)
+    for imgs, labels in dataloader:
+        imgs = imgs.to(device)  # imgs shape: (B, 1, 28, 28) for MNIST
+        # Use the batch Poisson encoder: returns shape (B, 784, T)
+        spike_trains = poisson_encode_batch(imgs, T, max_rate, dt, device)
+        B = imgs.shape[0]
+        layer.reset_batch(B)  # Reset the layer state for the entire batch
+        # Initialize spike count accumulator: shape (B, n_neurons)
+        batch_output_count = torch.zeros(B, layer.n_neurons, device=device)
+
+        # For each time step, process the batch in parallel
         for t in range(num_steps):
-            input_spikes = spike_train[:, t]  # Now shape is (784,)
-            spikes = layer.forward(input_spikes, t)
-            output_spike_count += spikes
-        feature_list.append(output_spike_count.cpu())
-        label_list.append(label)
-    features = torch.stack(feature_list)
-    labels = torch.tensor(label_list)
+            # For the t-th time step, get input spikes from all images:
+            # shape: (B, 784)
+            input_spikes = spike_trains[:, :, t]
+            # Run the batched forward pass; output shape: (B, n_neurons)
+            spikes = layer.forward_batch(input_spikes, t)
+            # Accumulate the spike counts over time:
+            batch_output_count += spikes
+
+        feature_list.append(batch_output_count.cpu())
+        label_list.append(labels)
+
+    features = torch.cat(feature_list, dim=0)
+    labels = torch.cat(label_list, dim=0)
     return features, labels
 
 
