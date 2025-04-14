@@ -5,6 +5,8 @@ import torchvision
 import torchvision.transforms as transforms
 import matplotlib.pyplot as plt
 import numpy as np
+from sklearn.metrics import confusion_matrix
+import seaborn as sns
 
 # Define the CNN model
 class CNNModel(nn.Module):
@@ -24,7 +26,7 @@ class CNNModel(nn.Module):
         x = self.fc2(x)
         return x
 
-# Convert CNN to SNN
+# Convert CNN to SNN (rate-based approximation)
 class SNNModel(nn.Module):
     def __init__(self, cnn_model):
         super(SNNModel, self).__init__()
@@ -35,7 +37,7 @@ class SNNModel(nn.Module):
         self.fc2 = cnn_model.fc2
 
     def forward(self, x):
-        # Simulate firing rates by applying ReLU activations
+        # Simulate firing rates via ReLU activations
         x = self.pool(F.relu(self.conv1(x)))
         x = self.pool(F.relu(self.conv2(x)))
         x = x.view(-1, 64 * 8 * 8)
@@ -44,6 +46,17 @@ class SNNModel(nn.Module):
         return x
 
 if __name__ == '__main__':
+    # Device selection: Check for Apple's MPS first, then CUDA, then default to CPU.
+    if torch.backends.mps.is_available():
+        device = torch.device("mps")
+        print("Using Apple GPU (MPS)")
+    elif torch.cuda.is_available():
+        device = torch.device("cuda")
+        print("Using CUDA GPU")
+    else:
+        device = torch.device("cpu")
+        print("Using CPU")
+
     # Load CIFAR-10 dataset
     transform = transforms.Compose([
         transforms.ToTensor(),
@@ -61,13 +74,12 @@ if __name__ == '__main__':
                                              shuffle=False, num_workers=2)
 
     # Initialize and train the CNN
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = CNNModel().to(device)
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
     print("Training CNN...")
-    for epoch in range(1):  # 1 epoch
+    for epoch in range(10):  # 10 epochs
         running_loss = 0.0
         for i, data in enumerate(trainloader, 0):
             inputs, labels = data[0].to(device), data[1].to(device)
@@ -79,22 +91,38 @@ if __name__ == '__main__':
             optimizer.step()
 
             running_loss += loss.item()
-        print(f"Epoch {epoch + 1}, Loss: {running_loss / len(trainloader)}")
+        print(f"Epoch {epoch + 1}, Loss: {running_loss / len(trainloader):.4f}")
 
     print("Finished Training CNN")
 
-    # Evaluate CNN on test data
+    # Evaluate CNN on test data and accumulate predictions for the confusion matrix
     correct = 0
     total = 0
+    all_preds = []
+    all_labels = []
     with torch.no_grad():
         for data in testloader:
             images, labels = data[0].to(device), data[1].to(device)
             outputs = model(images)
-            _, predicted = torch.max(outputs.data, 1)
+            _, predicted = torch.max(outputs, 1)
             total += labels.size(0)
             correct += (predicted == labels).sum().item()
+            # Save predictions and labels (move to CPU to work with numpy arrays)
+            all_preds.extend(predicted.cpu().numpy())
+            all_labels.extend(labels.cpu().numpy())
 
-    print(f"CNN Accuracy on test images: {100 * correct / total:.2f}%")
+    accuracy = 100 * correct / total
+    print(f"CNN Accuracy on test images: {accuracy:.2f}%")
+
+    # Compute and plot the confusion matrix
+    cm = confusion_matrix(all_labels, all_preds)
+    plt.figure(figsize=(10, 8))
+    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues",
+                xticklabels=trainset.classes, yticklabels=trainset.classes)
+    plt.xlabel("Predicted")
+    plt.ylabel("True")
+    plt.title("Confusion Matrix for CNN")
+    plt.show()
 
     # Convert CNN to SNN
     snn_model = SNNModel(model).to(device)
@@ -106,7 +134,7 @@ if __name__ == '__main__':
         for data in testloader:
             images, labels = data[0].to(device), data[1].to(device)
             outputs = snn_model(images)
-            _, predicted = torch.max(outputs.data, 1)
+            _, predicted = torch.max(outputs, 1)
             total += labels.size(0)
             correct += (predicted == labels).sum().item()
 
