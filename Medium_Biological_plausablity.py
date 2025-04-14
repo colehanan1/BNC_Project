@@ -9,6 +9,7 @@ from scipy.ndimage import gaussian_filter
 from sklearn.metrics import confusion_matrix
 import seaborn as sns
 from torch.utils.data import DataLoader
+from sklearn.decomposition import PCA
 
 # -------------------------------
 # Device Selection: Use MPS on Apple M2 if available, otherwise CUDA or CPU.
@@ -116,6 +117,21 @@ def poisson_encode(image, T, max_rate, dt, device):
     return spike_train
 
 
+def plot_features_PCA(features, labels):
+    """
+    Perform PCA on the features and plot a 2D scatter plot colored by label.
+    """
+    pca = PCA(n_components=2)
+    features_2d = pca.fit_transform(features.numpy())
+    plt.figure(figsize=(8, 6))
+    scatter = plt.scatter(features_2d[:, 0], features_2d[:, 1], c=labels.numpy(), cmap='tab10', alpha=0.7)
+    plt.xlabel('PC1')
+    plt.ylabel('PC2')
+    plt.title('PCA of Extracted Features')
+    plt.colorbar(scatter, ticks=range(10), label='Digit')
+    plt.show()
+
+
 # -------------------------------
 # LIF Neuron Layer with STDP (Unsupervised Layer)
 # -------------------------------
@@ -158,7 +174,7 @@ class LIFNeuronLayer:
         self.V = self.V + self.dt * ((-self.V / self.tau_m) + I)
         spikes = (self.V >= self.V_thresh).float()  # shape (B, n_neurons)
         mask = spikes.bool()
-        self.V[mask] = self.V_reset
+        self.V[mask] = self.V_reset  # Reset fired neurons
         self.last_post_spike[mask] = t
         return spikes
 
@@ -196,7 +212,7 @@ class LIFNeuronLayer:
         dw = self.A_plus * torch.exp(-dt_diff / self.tau_plus) * pos_mask
         spike_mask = input_expanded * spikes.unsqueeze(2)  # shape (B, n_neurons, input_size)
         dw = dw * spike_mask
-        avg_dw = dw.mean(dim=0)  # shape: (n_neurons, input_size)
+        avg_dw = dw.mean(dim=0)  # shape (n_neurons, input_size)
         self.weights = self.weights + avg_dw
         self.weights = torch.clamp(self.weights, min=0)
         fired_mask = (input_spikes == 1).float()
@@ -204,12 +220,12 @@ class LIFNeuronLayer:
 
 
 # -------------------------------
-# Unsupervised Training Phase (STDP) – Batched Version
+# Unsupervised Training Phase (STDP) – Batched Version with Debugging
 # -------------------------------
 def unsupervised_training_batched(train_dataset, n_neurons=100, num_epochs=10, T=T, dt=dt, max_rate=max_rate,
-                                  device=device, batch_size=128):
+                                  device=device, batch_size=64):
     """
-    Unsupervised training using batched simulation.
+    Unsupervised training using batched simulation with additional debugging.
     """
     input_size = 28 * 28  # for MNIST
     num_steps = int(T / dt)
@@ -220,34 +236,61 @@ def unsupervised_training_batched(train_dataset, n_neurons=100, num_epochs=10, T
         epoch_start_time = time.time()
         epoch_spike_sum = 0.0
         num_batches = 0
+        # For debug: accumulate per-neuron spike counts over epoch
+        neuron_spike_sum = torch.zeros(n_neurons, device=device)
+        total_images = 0
 
         print(f"\n--- Unsupervised Training Epoch {epoch + 1}/{num_epochs} ---")
         for batch_idx, (imgs, labels) in enumerate(dataloader):
-            imgs = imgs.to(device)  # imgs shape: (B, 1, 28, 28)
-            spike_trains = poisson_encode_batch(imgs, T, max_rate, dt, device)  # shape: (B, 784, T)
-            B = spike_trains.shape[0]
+            imgs = imgs.to(device)  # (B, 1, 28, 28)
+            spike_trains = poisson_encode_batch(imgs, T, max_rate, dt, device)  # (B, 784, T)
+            B = imgs.shape[0]
+            total_images += B
             layer.reset_batch(B)
             output_spike_count = torch.zeros(B, n_neurons, device=device)
 
             for t in range(num_steps):
-                input_spikes = spike_trains[:, :, t]  # shape: (B, 784)
-                spikes = layer.forward_batch(input_spikes, t)  # shape: (B, n_neurons)
+                input_spikes = spike_trains[:, :, t]  # (B, 784)
+                spikes = layer.forward_batch(input_spikes, t)  # (B, n_neurons)
                 layer.update_stdp_batch(input_spikes, spikes, t)
                 output_spike_count += spikes
 
+            # Accumulate per-neuron spike counts
+            neuron_spike_sum += output_spike_count.sum(dim=0)  # sum over batch dimension
             batch_spike_sum = output_spike_count.sum().item()
             epoch_spike_sum += batch_spike_sum
             num_batches += 1
 
             if batch_idx % 50 == 0:
                 print(f"  Processed batch {batch_idx}/{len(dataloader)}")
+
         avg_spikes = epoch_spike_sum / (num_batches * B)
         weight_norm = torch.norm(layer.weights).item() / (n_neurons * input_size)
         epoch_duration = time.time() - epoch_start_time
+        firing_rates = neuron_spike_sum / total_images
 
         print(f"\nEpoch {epoch + 1} complete in {epoch_duration:.2f} sec.")
         print(f"   Average total spikes per image: {avg_spikes:.2f}")
         print(f"   Average weight norm: {weight_norm:.6f}")
+        print(
+            f"   Mean firing rate per neuron: {firing_rates.mean().item():.2f} spikes/image (std: {firing_rates.std().item():.2f})")
+
+        # Debug Plot: Histogram of weight norms
+        weight_norms = [torch.norm(layer.weights[i]).item() for i in range(n_neurons)]
+        plt.figure()
+        plt.hist(weight_norms, bins=20)
+        plt.title(f"Histogram of Weight Norms - Epoch {epoch + 1}")
+        plt.xlabel("Weight norm")
+        plt.ylabel("Frequency")
+        plt.show()
+
+        # Debug Plot: Histogram of average firing rates per neuron
+        plt.figure()
+        plt.hist(firing_rates.cpu().numpy(), bins=20)
+        plt.title(f"Histogram of Neuron Firing Rates - Epoch {epoch + 1}")
+        plt.xlabel("Average spikes per image")
+        plt.ylabel("Frequency")
+        plt.show()
 
     return layer
 
@@ -255,7 +298,7 @@ def unsupervised_training_batched(train_dataset, n_neurons=100, num_epochs=10, T
 # -------------------------------
 # Feature Extraction – Batched
 # -------------------------------
-def extract_features_batched(dataset, layer, T=T, dt=dt, max_rate=max_rate, device=device, batch_size=128):
+def extract_features_batched(dataset, layer, T=T, dt=dt, max_rate=max_rate, device=device, batch_size=64):
     """
     Extract spike count features from the unsupervised SNN for every image in a dataset using batch processing.
 
@@ -269,15 +312,15 @@ def extract_features_batched(dataset, layer, T=T, dt=dt, max_rate=max_rate, devi
     num_steps = int(T / dt)
 
     for imgs, labels in dataloader:
-        imgs = imgs.to(device)  # shape: (B, 1, 28, 28)
-        spike_trains = poisson_encode_batch(imgs, T, max_rate, dt, device)  # shape: (B, 784, T)
+        imgs = imgs.to(device)  # (B, 1, 28, 28)
+        spike_trains = poisson_encode_batch(imgs, T, max_rate, dt, device)  # (B, 784, T)
         B = imgs.shape[0]
         layer.reset_batch(B)
         batch_output_count = torch.zeros(B, layer.n_neurons, device=device)
 
         for t in range(num_steps):
-            input_spikes = spike_trains[:, :, t]  # shape: (B, 784)
-            spikes = layer.forward_batch(input_spikes, t)  # shape: (B, n_neurons)
+            input_spikes = spike_trains[:, :, t]  # (B, 784)
+            spikes = layer.forward_batch(input_spikes, t)  # (B, n_neurons)
             batch_output_count += spikes
 
         feature_list.append(batch_output_count.cpu())
@@ -337,7 +380,7 @@ def supervised_training(features, labels, num_epochs=10, lr=0.01):
 
 def evaluate_supervised(model, features, labels):
     """
-    Evaluate the supervised classifier on the test set, store the predictions and display a confusion matrix.
+    Evaluate the supervised classifier on the test set, store predictions, and display a confusion matrix.
     """
     model.eval()
     with torch.no_grad():
@@ -374,14 +417,14 @@ def visualize_raster(layer, img, T=T, dt=dt, max_rate=max_rate, device=device):
     Visualize spiking activity (raster plot) for a given image.
     """
     img = img.squeeze().to(device)
-    # Use the single-image Poisson encoder for visualization
+    # Use single-image Poisson encoding for visualization
     spike_train = poisson_encode(img, T, max_rate, dt, device)  # shape: (784, T)
     num_steps = int(T / dt)
-    layer.reset()  # reset for single sample
+    layer.reset()  # Reset for a single sample
     spikes_over_time = torch.zeros(layer.n_neurons, num_steps, device=device)
 
     for t in range(num_steps):
-        input_spikes = spike_train[:, t]
+        input_spikes = spike_train[:, t]  # shape: (784,)
         spikes = layer.forward(input_spikes, t)
         spikes_over_time[:, t] = spikes
     spikes_over_time = spikes_over_time.cpu().numpy()
@@ -410,24 +453,27 @@ if __name__ == "__main__":
     test_dataset = datasets.MNIST(root='./data', train=False, download=True, transform=transforms.ToTensor())
 
     # --- Phase 1: Unsupervised Training (STDP) ---
-    n_unsupervised_neurons = 100  # Adjust as needed
-    unsup_epochs = 10  # Increase for longer training if desired
+    n_unsupervised_neurons = 100  # Adjust number of neurons as needed
+    unsup_epochs = 10  # Increase epochs for better unsupervised learning
     start_time = time.time()
     unsup_layer = unsupervised_training_batched(train_dataset, n_neurons=n_unsupervised_neurons,
                                                 num_epochs=unsup_epochs, T=T, dt=dt, max_rate=max_rate,
-                                                device=device, batch_size=128)
+                                                device=device, batch_size=64)
     print(f"\nUnsupervised training completed in {(time.time() - start_time):.2f} seconds.")
 
     # --- Phase 2: Feature Extraction (Batched) ---
     print("\nExtracting features from unsupervised layer (training set)...")
     train_features, train_labels = extract_features_batched(train_dataset, unsup_layer, T=T, dt=dt,
-                                                            max_rate=max_rate, device=device, batch_size=128)
+                                                            max_rate=max_rate, device=device, batch_size=64)
     print(f"Extracted training feature shape: {train_features.shape}")
 
     print("\nExtracting features from unsupervised layer (test set)...")
     test_features, test_labels = extract_features_batched(test_dataset, unsup_layer, T=T, dt=dt,
-                                                          max_rate=max_rate, device=device, batch_size=128)
+                                                          max_rate=max_rate, device=device, batch_size=64)
     print(f"Extracted test feature shape: {test_features.shape}")
+
+    # Debug: Plot PCA of extracted features
+    plot_features_PCA(train_features, train_labels)
 
     # --- Phase 3: Supervised Training of the Linear Classifier ---
     sup_epochs = 10  # Increase as needed
