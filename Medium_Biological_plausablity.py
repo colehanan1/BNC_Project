@@ -207,7 +207,7 @@ class LIFNeuronLayer:
 # Unsupervised Training Phase (STDP) – Batched Version
 # -------------------------------
 def unsupervised_training_batched(train_dataset, n_neurons=100, num_epochs=10, T=T, dt=dt, max_rate=max_rate,
-                                  device=device, batch_size=64):
+                                  device=device, batch_size=128):
     """
     Unsupervised training using batched simulation.
     """
@@ -415,18 +415,18 @@ if __name__ == "__main__":
     start_time = time.time()
     unsup_layer = unsupervised_training_batched(train_dataset, n_neurons=n_unsupervised_neurons,
                                                 num_epochs=unsup_epochs, T=T, dt=dt, max_rate=max_rate,
-                                                device=device, batch_size=64)
+                                                device=device, batch_size=128)
     print(f"\nUnsupervised training completed in {(time.time() - start_time):.2f} seconds.")
 
     # --- Phase 2: Feature Extraction (Batched) ---
     print("\nExtracting features from unsupervised layer (training set)...")
     train_features, train_labels = extract_features_batched(train_dataset, unsup_layer, T=T, dt=dt,
-                                                            max_rate=max_rate, device=device, batch_size=64)
+                                                            max_rate=max_rate, device=device, batch_size=128)
     print(f"Extracted training feature shape: {train_features.shape}")
 
     print("\nExtracting features from unsupervised layer (test set)...")
     test_features, test_labels = extract_features_batched(test_dataset, unsup_layer, T=T, dt=dt,
-                                                          max_rate=max_rate, device=device, batch_size=64)
+                                                          max_rate=max_rate, device=device, batch_size=128)
     print(f"Extracted test feature shape: {test_features.shape}")
 
     # --- Phase 3: Supervised Training of the Linear Classifier ---
