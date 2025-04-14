@@ -222,8 +222,8 @@ class LIFNeuronLayer:
 # -------------------------------
 # Unsupervised Training Phase (STDP) – Batched Version with Debugging
 # -------------------------------
-def unsupervised_training_batched(train_dataset, n_neurons=100, num_epochs=10, T=T, dt=dt, max_rate=max_rate,
-                                  device=device, batch_size=64):
+def unsupervised_training_batched(train_dataset, n_neurons=100, num_epochs=5, T=T, dt=dt, max_rate=max_rate,
+                                  device=device, batch_size=128):
     """
     Unsupervised training using batched simulation with additional debugging.
     """
@@ -298,7 +298,7 @@ def unsupervised_training_batched(train_dataset, n_neurons=100, num_epochs=10, T
 # -------------------------------
 # Feature Extraction – Batched
 # -------------------------------
-def extract_features_batched(dataset, layer, T=T, dt=dt, max_rate=max_rate, device=device, batch_size=64):
+def extract_features_batched(dataset, layer, T=T, dt=dt, max_rate=max_rate, device=device, batch_size=128):
     """
     Extract spike count features from the unsupervised SNN for every image in a dataset using batch processing.
 
@@ -343,7 +343,7 @@ class LinearClassifier(nn.Module):
         return self.fc(x)
 
 
-def supervised_training(features, labels, num_epochs=10, lr=0.01):
+def supervised_training(features, labels, num_epochs=5, lr=0.01):
     """
     Train a simple linear classifier on the extracted features.
 
@@ -454,29 +454,29 @@ if __name__ == "__main__":
 
     # --- Phase 1: Unsupervised Training (STDP) ---
     n_unsupervised_neurons = 100  # Adjust number of neurons as needed
-    unsup_epochs = 10  # Increase epochs for better unsupervised learning
+    unsup_epochs = 5  # Increase epochs for better unsupervised learning
     start_time = time.time()
     unsup_layer = unsupervised_training_batched(train_dataset, n_neurons=n_unsupervised_neurons,
                                                 num_epochs=unsup_epochs, T=T, dt=dt, max_rate=max_rate,
-                                                device=device, batch_size=64)
+                                                device=device, batch_size=128)
     print(f"\nUnsupervised training completed in {(time.time() - start_time):.2f} seconds.")
 
     # --- Phase 2: Feature Extraction (Batched) ---
     print("\nExtracting features from unsupervised layer (training set)...")
     train_features, train_labels = extract_features_batched(train_dataset, unsup_layer, T=T, dt=dt,
-                                                            max_rate=max_rate, device=device, batch_size=64)
+                                                            max_rate=max_rate, device=device, batch_size=128)
     print(f"Extracted training feature shape: {train_features.shape}")
 
     print("\nExtracting features from unsupervised layer (test set)...")
     test_features, test_labels = extract_features_batched(test_dataset, unsup_layer, T=T, dt=dt,
-                                                          max_rate=max_rate, device=device, batch_size=64)
+                                                          max_rate=max_rate, device=device, batch_size=128)
     print(f"Extracted test feature shape: {test_features.shape}")
 
     # Debug: Plot PCA of extracted features
     plot_features_PCA(train_features, train_labels)
 
     # --- Phase 3: Supervised Training of the Linear Classifier ---
-    sup_epochs = 10  # Increase as needed
+    sup_epochs = 5  # Increase as needed
     lr = 0.01
     print("\nTraining supervised read-out (linear classifier) on extracted features...")
     classifier = supervised_training(train_features, train_labels, num_epochs=sup_epochs, lr=lr)
