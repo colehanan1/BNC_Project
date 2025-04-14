@@ -113,6 +113,10 @@ class LIFNeuronLayer:
         # To keep it simple, we can update these per batch during the simulation.
         self.last_post_spike = None  # will be set during batch simulation
         self.last_pre_spike = None
+        self.A_plus = 0.01
+        self.A_minus = -0.012
+        self.tau_plus = 20.0
+        self.tau_minus = 20.0
 
     def reset_batch(self, batch_size):
         """Reset membrane potentials and last spike times for a batch."""
@@ -248,7 +252,7 @@ def extract_features(dataset, layer, T=T, dt=dt, max_rate=max_rate, device=devic
     num_steps = int(T / dt)
     for img, label in dataset:
         img = img.squeeze().to(device)
-        spike_train = poisson_encode(img, T, max_rate, dt, device)
+        spike_train = poisson_encode_batch(img, T, max_rate, dt, device)
         layer.reset()
         output_spike_count = torch.zeros(layer.n_neurons, device=device)
         for t in range(num_steps):
@@ -355,7 +359,7 @@ def visualize_raster(layer, img, T=T, dt=dt, max_rate=max_rate, device=device):
     Visualize spiking activity (raster plot) for a given image.
     """
     img = img.squeeze().to(device)
-    spike_train = poisson_encode(img, T, max_rate, dt, device)
+    spike_train = poisson_encode_batch(img, T, max_rate, dt, device)
     num_steps = int(T / dt)
     layer.reset()
     spikes_over_time = torch.zeros(layer.n_neurons, num_steps, device=device)
@@ -392,8 +396,10 @@ if __name__ == "__main__":
     n_unsupervised_neurons = 100  # Increase number of neurons for a richer feature set.
     unsup_epochs = 10  # Increase as needed for your experiment.
     start_time = time.time()
-    unsup_layer = unsupervised_training(train_dataset, n_neurons=n_unsupervised_neurons, num_epochs=unsup_epochs, T=T,
-                                        dt=dt, max_rate=max_rate, device=device)
+    unsup_layer = unsupervised_training_batched(train_dataset, n_neurons=n_unsupervised_neurons,
+                                                num_epochs=unsup_epochs, T=T,
+                                                dt=dt, max_rate=max_rate, device=device)
+
     print(f"\nUnsupervised training completed in {(time.time() - start_time):.2f} seconds.")
 
     # --- Phase 2: Feature Extraction ---
