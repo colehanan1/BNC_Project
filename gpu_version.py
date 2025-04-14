@@ -1,252 +1,113 @@
-from brian2 import *
-from brian2 import prefs
-from brian2cuda import device as cuda_device
-set_device('cuda_standalone', build_on_run=False)
-prefs.codegen.target = 'cuda_standalone'
-
-import numpy as np
-from tensorflow.keras.datasets import cifar10
-from skimage.color import rgb2gray
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torchvision
+import torchvision.transforms as transforms
 import matplotlib.pyplot as plt
-import seaborn as sns
-from sklearn.metrics import confusion_matrix
-from collections import Counter
+import numpy as np
 
-clip = np.clip
+# Define the CNN model
+class CNNModel(nn.Module):
+    def __init__(self):
+        super(CNNModel, self).__init__()
+        self.conv1 = nn.Conv2d(3, 32, kernel_size=3, padding=1)
+        self.pool = nn.MaxPool2d(2, 2)
+        self.conv2 = nn.Conv2d(32, 64, kernel_size=3, padding=1)
+        self.fc1 = nn.Linear(64 * 8 * 8, 512)
+        self.fc2 = nn.Linear(512, 10)
 
-(x_train, y_train), (x_test, y_test) = cifar10.load_data()
-y_train = y_train.flatten()
-y_test = y_test.flatten()
-class_names = ['airplane', 'automobile', 'bird', 'cat', 'deer',
-               'dog', 'frog', 'horse', 'ship', 'truck']
+    def forward(self, x):
+        x = self.pool(F.relu(self.conv1(x)))  # 32x32x3 -> 16x16x32
+        x = self.pool(F.relu(self.conv2(x)))  # 16x16x32 -> 8x8x64
+        x = x.view(-1, 64 * 8 * 8)
+        x = F.relu(self.fc1(x))
+        x = self.fc2(x)
+        return x
 
-# Full CIFAR-10 dataset for more robust training
-num_train = 50000
-num_test = 10000
-training_images = x_train[:num_train].copy()
-training_labels = y_train[:num_train].copy()
-test_images = x_test[:num_test].copy()
-test_labels = y_test[:num_test].copy()
+# Convert CNN to SNN
+class SNNModel(nn.Module):
+    def __init__(self, cnn_model):
+        super(SNNModel, self).__init__()
+        self.conv1 = cnn_model.conv1
+        self.pool = cnn_model.pool
+        self.conv2 = cnn_model.conv2
+        self.fc1 = cnn_model.fc1
+        self.fc2 = cnn_model.fc2
 
-def poisson_encode_image(image_color, duration=100, max_rate=100):
-    image = rgb2gray(image_color.astype(float) / 255.0)
-    p2, p98 = np.percentile(image, (2, 98))
-    image = np.clip((image - p2) / (p98 - p2 + 1e-8), 0, 1)
-    rate_map = image * max_rate
-    spikes = []
-    for t in range(duration):
-        rand_vals = np.random.rand(*rate_map.shape) * max_rate
-        fired = rand_vals < rate_map
-        indices = np.where(fired)
-        for i, j in zip(*indices):
-            neuron_idx = i * image.shape[1] + j
-            spikes.append((neuron_idx, t))
-    return spikes, image
+    def forward(self, x):
+        # Simulate firing rates by applying ReLU activations
+        x = self.pool(F.relu(self.conv1(x)))
+        x = self.pool(F.relu(self.conv2(x)))
+        x = x.view(-1, 64 * 8 * 8)
+        x = F.relu(self.fc1(x))
+        x = self.fc2(x)
+        return x
 
-# Adjusted temporal window for STDP
-tau_pre = 40 * ms
-tau_post = 40 * ms
-A_pre = 0.02
-A_post = -0.03
-w_max = 1.0
+if __name__ == '__main__':
+    # Load CIFAR-10 dataset
+    transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+    ])
 
-stdp_model = '''
-w : 1
-dpre/dt = -pre/tau_pre : 1 (event-driven)
-dpost/dt = -post/tau_post : 1 (event-driven)
-'''
+    trainset = torchvision.datasets.CIFAR10(root='./data', train=True,
+                                            download=True, transform=transform)
+    trainloader = torch.utils.data.DataLoader(trainset, batch_size=64,
+                                              shuffle=True, num_workers=2)
 
-stdp_on_pre = '''
-v_post += w
-pre += A_pre
-w = clip(w + post, 0, w_max)
-'''
+    testset = torchvision.datasets.CIFAR10(root='./data', train=False,
+                                           download=True, transform=transform)
+    testloader = torch.utils.data.DataLoader(testset, batch_size=64,
+                                             shuffle=False, num_workers=2)
 
-stdp_on_post = '''
-post += A_post
-w = clip(w + pre, 0, w_max)
-'''
+    # Initialize and train the CNN
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = CNNModel().to(device)
+    criterion = nn.CrossEntropyLoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
-# R-STDP for output layer
-reward_signal = TimedArray([0.0], dt=1*ms)
+    print("Training CNN...")
+    for epoch in range(1):  # 1 epoch
+        running_loss = 0.0
+        for i, data in enumerate(trainloader, 0):
+            inputs, labels = data[0].to(device), data[1].to(device)
 
-rstdp_model = '''
-w : 1
-dpre/dt = -pre/tau_pre : 1 (event-driven)
-dpost/dt = -post/tau_post : 1 (event-driven)
-'''
+            optimizer.zero_grad()
+            outputs = model(inputs)
+            loss = criterion(outputs, labels)
+            loss.backward()
+            optimizer.step()
 
-rstdp_on_pre = '''
-v_post += w
-pre += A_pre
-'''
+            running_loss += loss.item()
+        print(f"Epoch {epoch + 1}, Loss: {running_loss / len(trainloader)}")
 
-rstdp_on_post = '''
-post += A_post
-w = clip(w + reward_signal(t) * pre, 0, w_max)
-'''
+    print("Finished Training CNN")
 
-H_img, W_img = 32, 32
-N_input = H_img * W_img
-N_hidden1 = 500
-N_hidden2 = 200
-N_output = 10
+    # Evaluate CNN on test data
+    correct = 0
+    total = 0
+    with torch.no_grad():
+        for data in testloader:
+            images, labels = data[0].to(device), data[1].to(device)
+            outputs = model(images)
+            _, predicted = torch.max(outputs.data, 1)
+            total += labels.size(0)
+            correct += (predicted == labels).sum().item()
 
-tau = 10 * ms
-V_th = 0.5
-V_reset = 0.0
-refractory = 5 * ms
+    print(f"CNN Accuracy on test images: {100 * correct / total:.2f}%")
 
-eqs = '''
-dv/dt = -v/tau : 1 (unless refractory)
-'''
+    # Convert CNN to SNN
+    snn_model = SNNModel(model).to(device)
 
-G_input = SpikeGeneratorGroup(N_input, [], [] * ms)
-G_hidden1 = NeuronGroup(N_hidden1, eqs, threshold='v > V_th', reset='v = V_reset',
-                        refractory=refractory, method='linear')
-G_hidden2 = NeuronGroup(N_hidden2, eqs, threshold='v > V_th', reset='v = V_reset',
-                        refractory=refractory, method='linear')
-G_output = NeuronGroup(N_output, eqs, threshold='v > V_th', reset='v = V_reset',
-                       refractory=refractory, method='linear')
+    # Evaluate SNN on test data
+    correct = 0
+    total = 0
+    with torch.no_grad():
+        for data in testloader:
+            images, labels = data[0].to(device), data[1].to(device)
+            outputs = snn_model(images)
+            _, predicted = torch.max(outputs.data, 1)
+            total += labels.size(0)
+            correct += (predicted == labels).sum().item()
 
-syn_in_hidden1 = Synapses(G_input, G_hidden1, model=stdp_model,
-                          on_pre=stdp_on_pre, on_post=stdp_on_post)
-syn_in_hidden1.connect(p=0.2)
-syn_in_hidden1.w = '0.01 * rand()'
-
-syn_hidden1_hidden2 = Synapses(G_hidden1, G_hidden2, model='w : 1', on_pre='v_post += w')
-syn_hidden1_hidden2.connect(p=0.2)
-syn_hidden1_hidden2.w = '0.01 * rand()'
-
-# R-STDP version of hidden2->output
-syn_hidden2_output = Synapses(G_hidden2, G_output, model=rstdp_model,
-                              on_pre=rstdp_on_pre, on_post=rstdp_on_post)
-syn_hidden2_output.connect(p=0.2)
-syn_hidden2_output.w = '0.01 * rand()'
-
-lateral_inhib_h2 = Synapses(G_hidden2, G_hidden2, on_pre='v_post -= 0.3')
-lateral_inhib_h2.connect(condition='i != j', p=0.1)
-
-syn_inhib = Synapses(G_output, G_output, on_pre='v_post -= 0.5')
-syn_inhib.connect(condition='i != j')
-
-spike_monitor_hidden = SpikeMonitor(G_hidden2)
-spike_monitor_output = SpikeMonitor(G_output)
-state_monitor_hidden = StateMonitor(G_hidden2, 'v', record=True)
-
-net = Network()
-net.add(G_input, G_hidden1, G_hidden2, G_output,
-        syn_in_hidden1, syn_hidden1_hidden2, syn_hidden2_output,
-        lateral_inhib_h2, syn_inhib,
-        spike_monitor_hidden, spike_monitor_output, state_monitor_hidden)
-
-num_epochs = 10
-
-print("Starting training...")
-
-for epoch in range(num_epochs):
-    print(f"Epoch {epoch + 1}")
-    for idx, (img, label) in enumerate(zip(training_images, training_labels)):
-        spikes, _ = poisson_encode_image(img)
-        input_indices = [s[0] for s in spikes]
-        input_times = [s[1] for s in spikes]
-
-        current_offset = float(defaultclock.t / ms)
-        shifted_times = [(t + current_offset) * ms for t in input_times]
-        G_input.set_spikes(input_indices, shifted_times)
-
-        G_hidden1.v = 0
-        G_hidden2.v = 0
-        G_output.v = 0
-
-        # Increased simulation time to 200ms for better spike integration
-        net.run(200 * ms, report='text')
-
-        spike_counts = np.array([(spike_monitor_output.i == neur).sum() for neur in range(N_output)])
-        pred_label = spike_counts.argmax()
-
-        # Assign reward based on correctness
-        reward_val = 1.0 if pred_label == label else -1.0
-        reward_signal.values = np.full_like(reward_signal.values, reward_val)
-
-        print(f"  Trained on image {idx + 1}/{num_train} in epoch {epoch + 1}")
-
-sum_weights = np.sum(syn_in_hidden1.w[:])
-if sum_weights > 0:
-    syn_in_hidden1.w[:] = syn_in_hidden1.w[:] / sum_weights * w_max
-
-previous_weights = syn_in_hidden1.w[:]
-
-# Reshape for visualization with error handling
-weight_vector = np.array(previous_weights)
-try:
-    weight_matrix = weight_vector.reshape((N_input, N_hidden1))[:100, :100]
-except ValueError:
-    print("Warning: Could not reshape weights into expected (N_input, N_hidden1) shape.")
-    weight_matrix = np.zeros((100, 100))
-# Build and run the simulation on GPU
-print("Training complete. Building GPU simulation...")
-device.build(directory='output', compile=True, run=True)
-
-# Evaluation block with reward modulation during test
-print("Starting evaluation...")
-y_true = []
-y_pred = []
-
-for idx, (img, label) in enumerate(zip(test_images, test_labels)):
-    spikes, _ = poisson_encode_image(img)
-    input_indices = [s[0] for s in spikes]
-    input_times = [s[1] for s in spikes]
-
-    current_offset = float(defaultclock.t / ms)
-    shifted_times = [(t + current_offset) * ms for t in input_times]
-    G_input.set_spikes(input_indices, shifted_times)
-
-    G_hidden1.v = 0
-    G_hidden2.v = 0
-    G_output.v = 0
-
-    net.run(200 * ms)
-
-    spike_counts = np.array([(spike_monitor_output.i == neur).sum() for neur in range(N_output)])
-    pred_label = spike_counts.argmax()
-    y_true.append(label)
-    y_pred.append(pred_label)
-
-    # Apply reward modulation during test as well
-    reward_val = 1.0 if pred_label == label else -1.0
-    reward_signal.values = np.full_like(reward_signal.values, reward_val)
-
-    if idx % 100 == 0:
-        print(f"  Evaluated test image {idx + 1}/{num_test}")
-
-cm = confusion_matrix(y_true, y_pred)
-print("Confusion Matrix:")
-print(cm)
-
-plt.figure(figsize=(6, 5))
-sns.heatmap(cm, annot=True, fmt="d", cmap="Blues",
-            xticklabels=class_names, yticklabels=class_names)
-plt.xlabel("Predicted Label")
-plt.ylabel("True Label")
-plt.title("Confusion Matrix")
-plt.show()
-
-# Rich visual diagnostics
-plt.figure(figsize=(12, 3))
-plt.title("Hidden Neuron Firing Rates (Training Summary)")
-counts = Counter(spike_monitor_hidden.i)
-activity = np.zeros(N_hidden2)
-for i, c in counts.items():
-    activity[i] = c
-plt.bar(range(N_hidden2), activity)
-plt.xlabel("Neuron Index")
-plt.ylabel("Spikes")
-plt.show()
-
-plt.figure(figsize=(6, 5))
-sns.heatmap(weight_matrix, cmap='viridis')
-plt.title("Weight Matrix Visualization (100x100 block)")
-plt.xlabel("Hidden Neuron")
-plt.ylabel("Input Neuron")
-plt.show()
+    print(f"SNN Accuracy on test images: {100 * correct / total:.2f}%")
