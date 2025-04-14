@@ -8,6 +8,8 @@ import numpy as np
 from scipy.ndimage import gaussian_filter
 from sklearn.metrics import confusion_matrix
 import seaborn as sns
+from torch.utils.data import DataLoader
+
 # -------------------------------
 # Device Selection: Use MPS on Apple M2 if available, otherwise CUDA or CPU.
 # -------------------------------
@@ -25,7 +27,7 @@ else:
 # Global Simulation and Training Parameters
 # -------------------------------
 T = 100  # Total simulation time (ms) per image
-dt = 1.0  # Time step (ms)
+dt = 2.0  # Time step (ms)
 num_steps = int(T / dt)
 max_rate = 100.0  # Maximum firing rate (Hz)
 
@@ -62,48 +64,42 @@ def dog_filter(image, sigma1=1.0, sigma2=2.0):
     return filtered
 
 
-def poisson_encode(image, T, max_rate, dt, device):
+def poisson_encode_batch(images, T, max_rate, dt, device):
     """
-    Convert a normalized image (values in [0, 1]) into a spike train using Poisson coding.
+    Batch version of Poisson encoding with DoG filtering.
 
     Args:
-        image (torch.Tensor): Tensor of shape (H, W) with values in [0,1].
+        images (torch.Tensor): Tensor of shape (B, 1, H, W).
         T (int): Total simulation time (ms).
         max_rate (float): Maximum firing rate (Hz).
         dt (float): Time step (ms).
-        device (torch.device): Device to use.
+        device (torch.device): Device to run on.
 
     Returns:
-        torch.Tensor: Spike train of shape (num_pixels, T)
+        torch.Tensor: Spike train tensor of shape (B, num_pixels, T).
     """
-    # Convert tensor to numpy for DoG filtering, then back to tensor.
-    img_np = image.cpu().numpy()
-    filtered = dog_filter(img_np, sigma1, sigma2)
-    filtered_tensor = torch.tensor(filtered, dtype=torch.float32, device=device)
-    flat = filtered_tensor.view(-1)  # shape: (num_pixels,)
-    probability = flat * max_rate * dt / 1000.0  # dt in ms, rate in Hz
-    rand_vals = torch.rand(flat.size(0), T, device=device)
-    spike_train = (rand_vals < probability.unsqueeze(1)).float()
-    return spike_train
+    batch_size = images.shape[0]
+    # Remove the channel dimension and convert each image using DoG
+    images = images.squeeze(1)  # shape: (B, H, W)
+    spike_trains = []
+    for b in range(batch_size):
+        # Apply DoG filtering on CPU (or vectorize this with torch if you prefer)
+        img_np = images[b].cpu().numpy()
+        filtered = dog_filter(img_np, sigma1, sigma2)
+        filtered_tensor = torch.tensor(filtered, dtype=torch.float32, device=device)
+        flat = filtered_tensor.view(-1)  # shape: (num_pixels,)
+        probability = flat * max_rate * dt / 1000.0  # Convert to probability
+        rand_vals = torch.rand(flat.size(0), T, device=device)
+        spike_train = (rand_vals < probability.unsqueeze(1)).float()  # shape: (num_pixels, T)
+        spike_trains.append(spike_train)
+    return torch.stack(spike_trains)  # shape: (B, num_pixels, T)
 
 
 # -------------------------------
 # LIF Neuron Layer with STDP (Unsupervised Layer)
 # -------------------------------
 class LIFNeuronLayer:
-    def __init__(self, n_neurons, input_size, dt=1.0, tau_m=20.0, V_thresh=1.0, V_reset=0.0, device=device):
-        """
-        Initialize a layer of LIF neurons.
-
-        Args:
-            n_neurons (int): Number of output neurons.
-            input_size (int): Number of input neurons.
-            dt (float): Time step in ms.
-            tau_m (float): Membrane time constant (ms).
-            V_thresh (float): Threshold for spiking.
-            V_reset (float): Reset potential after spike.
-            device (torch.device): Device to use.
-        """
+    def __init__(self, n_neurons, input_size, dt=2.0, tau_m=20.0, V_thresh=1.0, V_reset=0.0, device=device):
         self.device = device
         self.n_neurons = n_neurons
         self.input_size = input_size
@@ -111,134 +107,130 @@ class LIFNeuronLayer:
         self.tau_m = tau_m
         self.V_thresh = V_thresh
         self.V_reset = V_reset
-        self.V = torch.zeros(n_neurons, device=device)
+        # We don't initialize V here since it will be created per batch.
         self.weights = torch.rand(n_neurons, input_size, device=device) * 0.1
-        self.last_post_spike = torch.full((n_neurons,), -1e8, device=device)
-        self.last_pre_spike = torch.full((input_size,), -1e8, device=device)
-        # STDP parameters
-        self.A_plus = 0.01
-        self.A_minus = -0.012
-        self.tau_plus = 20.0
-        self.tau_minus = 20.0
+        # For batched simulation, we maintain last spike times for each sample separately.
+        # To keep it simple, we can update these per batch during the simulation.
+        self.last_post_spike = None  # will be set during batch simulation
+        self.last_pre_spike = None
 
-    def reset(self):
-        """Reset membrane potentials."""
-        self.V = torch.zeros(self.n_neurons, device=self.device)
+    def reset_batch(self, batch_size):
+        """Reset membrane potentials and last spike times for a batch."""
+        self.V = torch.zeros(batch_size, self.n_neurons, device=self.device)
+        self.last_post_spike = torch.full((batch_size, self.n_neurons), -1e8, device=self.device)
+        self.last_pre_spike = torch.full((batch_size, self.input_size), -1e8, device=self.device)
 
-    def forward(self, input_spikes, t):
+    def forward_batch(self, input_spikes, t):
         """
-        Process one simulation time step.
+        Vectorized forward pass for a batch.
 
         Args:
-            input_spikes (torch.Tensor): Binary tensor (input_size,) for current time step.
-            t (int): Current simulation time step.
+            input_spikes (torch.Tensor): Tensor of shape (B, input_size) for current time step.
+            t (int): current simulation time step.
 
         Returns:
-            torch.Tensor: Output spike vector (n_neurons,)
+            torch.Tensor: Output spikes for the batch, shape (B, n_neurons).
         """
-        I = torch.matmul(self.weights, input_spikes)  # Weighted input current
+        # Compute the input current for the batch: shape (B, n_neurons)
+        I = torch.matmul(input_spikes, self.weights.t())
         self.V = self.V + self.dt * ((-self.V / self.tau_m) + I)
+        # Determine spikes: shape (B, n_neurons)
         spikes = (self.V >= self.V_thresh).float()
-        fired_idx = (spikes == 1).nonzero(as_tuple=True)[0]
-        if fired_idx.numel() > 0:
-            self.V[fired_idx] = self.V_reset
-            self.last_post_spike[fired_idx] = t
+        # Reset neurons that fired
+        mask = spikes.bool()
+        self.V[mask] = self.V_reset
+        # Update last_post_spike for cells that fired
+        self.last_post_spike[mask] = t
         return spikes
 
-    def update_stdp(self, input_spikes, spikes, t):
+    def update_stdp_batch(self, input_spikes, spikes, t):
         """
-        Update weights with a basic STDP rule.
+        A simplified vectorized STDP update for a batch.
+        Note: Fully vectorizing STDP can be tricky. Here we compute a batch-averaged update.
 
         Args:
-            input_spikes (torch.Tensor): Binary input spike vector (input_size,).
-            spikes (torch.Tensor): Binary output spike vector (n_neurons,).
-            t (int): Current time.
+            input_spikes (torch.Tensor): Batch tensor, shape (B, input_size).
+            spikes (torch.Tensor): Batch tensor, shape (B, n_neurons).
+            t (int): current simulation time.
         """
-        for j in range(self.n_neurons):
-            if spikes[j] == 1:
-                for i in range(self.input_size):
-                    if input_spikes[i] == 1:
-                        dt_diff = t - self.last_pre_spike[i]
-                        if dt_diff >= 0:
-                            dw = self.A_plus * torch.exp(-dt_diff / self.tau_plus)
-                        else:
-                            dw = self.A_minus * torch.exp(dt_diff / self.tau_minus)
-                        new_weight = self.weights[j, i].item() + dw.item()
-                        new_weight = max(new_weight, 0)  # Keep non-negative
-                        self.weights[j, i] = torch.tensor(new_weight, device=self.device)
-        for i in range(self.input_size):
-            if input_spikes[i] == 1:
-                self.last_pre_spike[i] = t
-
+        B = input_spikes.shape[0]
+        # Create a mask where both input and output fired: shape (B, n_neurons, input_size)
+        input_expanded = input_spikes.unsqueeze(1).expand(B, self.n_neurons, self.input_size)
+        # For a proper implementation, you’d calculate the time difference per sample.
+        # Here we compute an average time difference along the batch:
+        dt_diff = t - self.last_pre_spike  # shape (B, input_size)
+        dt_diff = dt_diff.unsqueeze(1)  # shape (B, 1, input_size)
+        # Create STDP updates for the batch:
+        # For simplicity, we treat all dt_diff >= 0 as potentiation:
+        pos_mask = (dt_diff >= 0).float()
+        # Compute weight updates (this is a simplification):
+        dw = self.A_plus * torch.exp(-dt_diff / self.tau_plus) * pos_mask
+        # Mask by where both input and output spiked:
+        spike_mask = input_expanded * spikes.unsqueeze(2)  # shape (B, n_neurons, input_size)
+        dw = dw * spike_mask
+        # Average across the batch dimension:
+        avg_dw = dw.mean(dim=0)  # shape (n_neurons, input_size)
+        self.weights = self.weights + avg_dw
+        # Ensure non-negative weights
+        self.weights = torch.clamp(self.weights, min=0)
+        # Update last_pre_spike (for batch, average update)
+        fired_mask = (input_spikes == 1).float()
+        self.last_pre_spike = self.last_pre_spike * (1 - fired_mask) + t * fired_mask
 
 # -------------------------------
 # Unsupervised Training Phase (STDP)
 # -------------------------------
-def unsupervised_training(train_dataset, n_neurons=100, num_epochs=1, T=T, dt=dt, max_rate=max_rate, device=device):
+def unsupervised_training_batched(train_dataset, n_neurons=100, num_epochs=1, T=T, dt=dt, max_rate=max_rate,
+                                  device=device, batch_size=64):
     """
-    Train the unsupervised SNN layer with STDP on MNIST (with data augmentation).
-
-    Args:
-        train_dataset: PyTorch MNIST training dataset.
-        n_neurons (int): Number of neurons (features) in the unsupervised layer.
-        num_epochs (int): Number of training epochs.
-        T (int): Simulation time per image.
-        dt (float): Time step.
-        max_rate (float): Maximum firing rate.
-        device (torch.device): Device to use.
-
-    Returns:
-        layer: Trained LIFNeuronLayer.
+    Unsupervised training using batched simulation.
     """
-    input_size = 28 * 28  # MNIST images are 28x28
+    input_size = 28 * 28  # for MNIST
     num_steps = int(T / dt)
     layer = LIFNeuronLayer(n_neurons=n_neurons, input_size=input_size, dt=dt, device=device)
-
-    previous_weight_norm = None
-    previous_avg_spikes = None
+    dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=2)
 
     for epoch in range(num_epochs):
         epoch_start_time = time.time()
         epoch_spike_sum = 0.0
-        num_images = 0
+        num_batches = 0
 
         print(f"\n--- Unsupervised Training Epoch {epoch + 1}/{num_epochs} ---")
-        for idx, (img, label) in enumerate(train_dataset):
-            # img shape: (1, 28, 28)
-            # Remove channel dimension and send to device.
-            img = img.squeeze().to(device)
-            # Apply Poisson encoding after DoG filtering.
-            spike_train = poisson_encode(img, T, max_rate, dt, device)  # shape: (784, T)
-            layer.reset()
-            output_spike_count = torch.zeros(n_neurons, device=device)
-            for t in range(num_steps):
-                input_spikes = spike_train[:, t]
-                spikes = layer.forward(input_spikes, t)
-                layer.update_stdp(input_spikes, spikes, t)
-                output_spike_count += spikes
-            epoch_spike_sum += output_spike_count.sum().item()
-            num_images += 1
-            if idx % 1000 == 0 and idx > 0:
-                print(f"  Processed {idx} images in current epoch...")
+        for batch_idx, (imgs, labels) in enumerate(dataloader):
+            # imgs shape: (B, 1, 28, 28)
+            imgs = imgs.to(device)
+            # Batch-poisson encode: shape (B, 784, T)
+            spike_trains = poisson_encode_batch(imgs, T, max_rate, dt, device)
+            B = spike_trains.shape[0]
+            # Reset layer state for the entire batch:
+            layer.reset_batch(B)
+            output_spike_count = torch.zeros(B, n_neurons, device=device)
 
-        avg_spikes = epoch_spike_sum / num_images
+            for t in range(num_steps):
+                # Get batched input spikes: shape (B, 784)
+                input_spikes = spike_trains[:, :, t]
+                # Forward pass: shape (B, n_neurons)
+                spikes = layer.forward_batch(input_spikes, t)
+                # Batch STDP update:
+                layer.update_stdp_batch(input_spikes, spikes, t)
+                output_spike_count += spikes
+
+            batch_spike_sum = output_spike_count.sum().item()
+            epoch_spike_sum += batch_spike_sum
+            num_batches += 1
+
+            if batch_idx % 50 == 0:
+                print(f"  Processed batch {batch_idx}/{len(dataloader)}")
+
+        avg_spikes = epoch_spike_sum / (num_batches * B)
         weight_norm = torch.norm(layer.weights).item() / (n_neurons * input_size)
         epoch_duration = time.time() - epoch_start_time
 
         print(f"\nEpoch {epoch + 1} complete in {epoch_duration:.2f} sec.")
         print(f"   Average total spikes per image: {avg_spikes:.2f}")
         print(f"   Average weight norm: {weight_norm:.6f}")
-        if epoch > 0:
-            diff_weight = weight_norm - previous_weight_norm
-            diff_spikes = avg_spikes - previous_avg_spikes
-            print("   Changes from previous epoch:")
-            print(f"       Weight norm change: {diff_weight:+.6f}")
-            print(f"       Average spikes change: {diff_spikes:+.2f}")
-        previous_weight_norm = weight_norm
-        previous_avg_spikes = avg_spikes
 
     return layer
-
 
 # -------------------------------
 # Feature Extraction from Unsupervised Layer
