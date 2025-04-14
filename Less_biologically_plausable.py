@@ -79,7 +79,7 @@ if __name__ == '__main__':
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
     print("Training CNN...")
-    for epoch in range(10):  # 10 epochs
+    for epoch in range(50):  # 50 epochs
         running_loss = 0.0
         for i, data in enumerate(trainloader, 0):
             inputs, labels = data[0].to(device), data[1].to(device)
