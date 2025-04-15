@@ -184,12 +184,17 @@ class LIFNeuronLayer:
         self.weights = self.weights / norm
 
     def update_thresholds(self, firing_rates, target_rate=20.0, lr_thresh=0.01):
-        """Adaptively update thresholds based on firing rates (with a small noise term)."""
+        """
+        Adaptively update thresholds based on firing rates (with a small noise term).
+        """
+        # Ensure firing_rates has the correct size
+        assert firing_rates.size(0) == self.n_neurons, \
+            f"Expected firing_rates size {self.n_neurons}, but got {firing_rates.size(0)}"
+
         adjustment = 1 + lr_thresh * (firing_rates - target_rate) / target_rate
         noise = torch.FloatTensor(self.n_neurons).uniform_(0.99, 1.01).to(self.device)
         self.V_thresh = self.V_thresh * adjustment * noise
         self.V_thresh = torch.clamp(self.V_thresh, min=0.3, max=1.0)
-
 
 # -------------------------------
 # Multi-Layer SNN (Two Layers)
@@ -239,79 +244,100 @@ class MultiLayerSNN:
 def unsupervised_training_batched_multi(train_dataset, n_neurons1, n_neurons2, num_epochs, T, dt, max_rate,
                                         device, batch_size):
     """
-    Unsupervised training for a two-layer SNN.
-    Returns a MultiLayerSNN model.
+    Unsupervised training for a two-layer SNN with STDP.
+    This function performs the training over multiple epochs and updates the thresholds and weights for each layer.
     """
-    input_size = 28 * 28  # MNIST
+    input_size = 28 * 28  # MNIST images are 28x28 pixels
     num_steps = int(T / dt)
+
+    # Create the multi-layer SNN model
     model = MultiLayerSNN(n_neurons1, n_neurons2, input_size, dt, tau_m=20.0, V_thresh_init=0.05, V_reset=0.0,
                           device=device)
     dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=2)
 
-    # We'll track outputs from the second layer as our final features.
+    # Keep track of the spike counts for debugging
+    neuron_spike_sum_layer1 = torch.zeros(n_neurons1, device=device)
+    neuron_spike_sum_layer2 = torch.zeros(n_neurons2, device=device)
+    total_images = 0
+
     for epoch in range(num_epochs):
         epoch_start_time = time.time()
         epoch_spike_sum = 0.0
         num_batches = 0
-        neuron_spike_sum = torch.zeros(n_neurons2, device=device)
-        total_images = 0
+        firing_rates_layer1 = torch.zeros(n_neurons1, device=device)
+        firing_rates_layer2 = torch.zeros(n_neurons2, device=device)
 
         print(f"\n--- Multi-Layer Unsupervised Training Epoch {epoch + 1}/{num_epochs} ---")
+
         for batch_idx, (imgs, labels) in enumerate(dataloader):
             imgs = imgs.to(device)  # (B, 1, 28, 28)
             spike_trains = poisson_encode_batch(imgs, T, max_rate, dt, device)  # (B, 784, T)
-            B = imgs.shape[0]
+            B = imgs.shape[0]  # Batch size
             total_images += B
-            model.reset_batch(B)
-            # We'll accumulate output spikes from layer2 for feature extraction.
-            output_spike_count = torch.zeros(B, n_neurons2, device=device)
 
+            model.reset_batch(B)
+            # Track the spikes from both layers
+            output_spike_count_layer1 = torch.zeros(B, n_neurons1, device=device)
+            output_spike_count_layer2 = torch.zeros(B, n_neurons2, device=device)
+
+            # Simulate the network over the time steps
             for t in range(num_steps):
-                # For each time step, run layer1 and then layer2.
+                # Forward pass for layer 1
                 input_spikes = spike_trains[:, :, t]  # (B, 784)
                 spikes1 = model.layer1.forward_batch(input_spikes, t)
                 model.layer1.update_stdp_batch(input_spikes, spikes1, t)
+
+                # Forward pass for layer 2 (using layer 1's output)
                 spikes2 = model.layer2.forward_batch(spikes1, t)
                 model.layer2.update_stdp_batch(spikes1, spikes2, t)
-                output_spike_count += spikes2
 
-            neuron_spike_sum += output_spike_count.sum(dim=0)
-            epoch_spike_sum += output_spike_count.sum().item()
+                output_spike_count_layer1 += spikes1
+                output_spike_count_layer2 += spikes2
+
+            # Update spike count sums
+            neuron_spike_sum_layer1 += output_spike_count_layer1.sum(dim=0)
+            neuron_spike_sum_layer2 += output_spike_count_layer2.sum(dim=0)
+            epoch_spike_sum += output_spike_count_layer2.sum().item()  # Layer2 spikes are the final feature representation
             num_batches += 1
 
             if batch_idx % 50 == 0:
                 print(f"  Processed batch {batch_idx}/{len(dataloader)}")
 
+        # Calculate average spikes and weight norms for debugging
         avg_spikes = epoch_spike_sum / (num_batches * B)
-        weight_norm1 = torch.norm(model.layer1.weights).item() / (n_neurons1 * (28 * 28))
-        weight_norm2 = torch.norm(model.layer2.weights).item() / (n_neurons2 * n_neurons1)
+        weight_norm_layer1 = torch.norm(model.layer1.weights).item() / (n_neurons1 * input_size)
+        weight_norm_layer2 = torch.norm(model.layer2.weights).item() / (n_neurons2 * n_neurons1)
         epoch_duration = time.time() - epoch_start_time
-        firing_rates = neuron_spike_sum / total_images
+        firing_rates_layer1 = neuron_spike_sum_layer1 / total_images
+        firing_rates_layer2 = neuron_spike_sum_layer2 / total_images
 
         print(f"\nEpoch {epoch + 1} complete in {epoch_duration:.2f} sec.")
         print(f"   Average total spikes per image (layer2): {avg_spikes:.2f}")
-        print(f"   Average weight norm layer1: {weight_norm1:.6f}, layer2: {weight_norm2:.6f}")
+        print(f"   Average weight norm layer1: {weight_norm_layer1:.6f}, layer2: {weight_norm_layer2:.6f}")
         print(
-            f"   Mean firing rate per neuron (layer2): {firing_rates.mean().item():.2f} spikes/image (std: {firing_rates.std().item():.2f})")
+            f"   Mean firing rate per neuron (layer2): {firing_rates_layer2.mean().item():.2f} spikes/image (std: {firing_rates_layer2.std().item():.2f})")
 
-        # Debug plots for layer2
-        weight_norms2 = [torch.norm(model.layer2.weights[i]).item() for i in range(n_neurons2)]
+        # Debugging plots
+        weight_norms_layer2 = [torch.norm(model.layer2.weights[i]).item() for i in range(n_neurons2)]
         plt.figure()
-        plt.hist(weight_norms2, bins=20)
+        plt.hist(weight_norms_layer2, bins=20)
         plt.title(f"Layer2 Weight Norms - Epoch {epoch + 1}")
         plt.xlabel("Weight Norm")
         plt.ylabel("Frequency")
         plt.show()
 
         plt.figure()
-        plt.hist(firing_rates.cpu().numpy(), bins=20)
+        plt.hist(firing_rates_layer2.cpu().numpy(), bins=20)
         plt.title(f"Layer2 Firing Rates - Epoch {epoch + 1}")
         plt.xlabel("Average Spikes per Image")
         plt.ylabel("Number of Neurons")
         plt.show()
 
-        model.normalize_weights()
-        model.update_thresholds(firing_rates, target_rate=20.0, lr_thresh=0.01)
+        # Normalize weights and update thresholds for both layers
+        model.layer1.normalize_weights()
+        model.layer2.normalize_weights()
+        model.layer1.update_thresholds(firing_rates_layer1, target_rate=20.0, lr_thresh=0.01)
+        model.layer2.update_thresholds(firing_rates_layer2, target_rate=20.0, lr_thresh=0.01)
 
     return model
 
