@@ -78,7 +78,7 @@ def poisson_encode_batch(images, T, max_rate, dt, device):
 def poisson_encode(image, T, max_rate, dt, device):
     """
     Single-image Poisson encoding.
-    Input image: 2D tensor (H, W). Returns tensor of shape (H*W, T).
+    Input: 2D tensor (H, W). Returns tensor of shape (H*W, T).
     """
     flat = image.view(-1)
     probability = flat * max_rate * dt / 1000.0
@@ -104,16 +104,17 @@ def plot_features_PCA(features, labels):
 # LIF Neuron Layer with STDP and Adaptive Thresholds
 # -------------------------------
 class LIFNeuronLayer:
-    def __init__(self, n_neurons, input_size, dt=2.0, tau_m=20.0, V_thresh_init=1.0, V_reset=0.0, device=device):
+    def __init__(self, n_neurons, input_size, dt=2.0, tau_m=20.0, V_thresh_init=0.5, V_reset=0.0, device=device):
         self.device = device
         self.n_neurons = n_neurons
         self.input_size = input_size
         self.dt = dt
         self.tau_m = tau_m
-        # Adaptive thresholds as a vector
+        # Adaptive thresholds initialized lower (e.g. 0.5)
         self.V_thresh = torch.ones(n_neurons, device=device) * V_thresh_init
         self.V_reset = V_reset
-        self.weights = torch.rand(n_neurons, input_size, device=device) * 0.1
+        # Increased weight initialization scale: [0, 0.5]
+        self.weights = torch.rand(n_neurons, input_size, device=device) * 0.5
         self.last_post_spike = None
         self.last_pre_spike = None
         # Tuned STDP parameters
@@ -133,29 +134,32 @@ class LIFNeuronLayer:
         Batched forward pass with lateral inhibition.
         Input: (B, input_size). Returns: (B, n_neurons).
         """
-        I = torch.matmul(input_spikes, self.weights.t())
-        # Lateral inhibition: subtract a fraction of the total activation
-        alpha = 0.1
+        I = torch.matmul(input_spikes, self.weights.t())  # (B, n_neurons)
+        # Reduced lateral inhibition strength:
+        alpha = 0.05
         inhibition = alpha * (I.sum(dim=1, keepdim=True) - I)
         I = I - inhibition
+        # Optionally: you can print I.mean() for debugging if needed.
         self.V = self.V + self.dt * ((-self.V / self.tau_m) + I)
-        # Use adaptive thresholds: expand threshold to match batch dimension
+        # Expand adaptive threshold to match batch dimension
         thresh = self.V_thresh.unsqueeze(0).expand_as(self.V)
-        spikes = (self.V >= thresh).float()
+        spikes = (self.V >= thresh).float()  # (B, n_neurons)
         mask = spikes.bool()
         self.V[mask] = self.V_reset
         self.last_post_spike[mask] = t
         return spikes
 
     def reset(self):
+        """Reset for a single sample."""
         self.reset_batch(1)
 
     def forward(self, input_spikes, t):
+        """Single sample forward pass."""
         return self.forward_batch(input_spikes.unsqueeze(0), t).squeeze(0)
 
     def update_stdp_batch(self, input_spikes, spikes, t):
         """
-        Simplified STDP update vectorized over batch.
+        Simplified vectorized STDP update for a batch.
         """
         B = input_spikes.shape[0]
         input_expanded = input_spikes.unsqueeze(1).expand(B, self.n_neurons, self.input_size)
@@ -163,38 +167,37 @@ class LIFNeuronLayer:
         dt_diff = dt_diff.unsqueeze(1)  # (B, 1, input_size)
         pos_mask = (dt_diff >= 0).float()
         dw = self.A_plus * torch.exp(-dt_diff / self.tau_plus) * pos_mask
-        spike_mask = input_expanded * spikes.unsqueeze(2)
+        spike_mask = input_expanded * spikes.unsqueeze(2)  # (B, n_neurons, input_size)
         dw = dw * spike_mask
-        avg_dw = dw.mean(dim=0)
+        avg_dw = dw.mean(dim=0)  # (n_neurons, input_size)
         self.weights = self.weights + avg_dw
         self.weights = torch.clamp(self.weights, min=0)
         fired_mask = (input_spikes == 1).float()
         self.last_pre_spike = self.last_pre_spike * (1 - fired_mask) + t * fired_mask
 
     def normalize_weights(self):
-        """Normalize each neuron's weights to unit norm."""
+        """Normalize each neuron's weight vector to unit norm."""
         norm = self.weights.norm(dim=1, keepdim=True) + 1e-8
         self.weights = self.weights / norm
 
     def update_thresholds(self, firing_rates, target_rate=20.0, lr_thresh=0.01):
         """
-        Adjust each neuron's threshold based on its firing rate.
-        If a neuron fires more than the target, increase its threshold; if less, decrease it.
+        Adjust each neuron's threshold based on its average firing rate.
+        Neurons firing above target have increased threshold; below target, decreased.
         """
-        # firing_rates: tensor of shape (n_neurons,), average spikes per image
         adjustment = 1 + lr_thresh * (firing_rates - target_rate) / target_rate
         self.V_thresh = self.V_thresh * adjustment
-        # Optionally clamp thresholds to a reasonable range:
-        self.V_thresh = torch.clamp(self.V_thresh, min=0.5, max=2.0)
+        self.V_thresh = torch.clamp(self.V_thresh, min=0.3, max=1.5)
 
 
 # -------------------------------
-# Unsupervised Training Phase (Batched) with Debugging and Adaptive Thresholds
+# Unsupervised Training Phase (Batched) with Debugging and Adaptive Mechanisms
 # -------------------------------
 def unsupervised_training_batched(train_dataset, n_neurons=100, num_epochs=10, T=T, dt=dt, max_rate=max_rate,
                                   device=device, batch_size=64):
     """
-    Unsupervised training with STDP, lateral inhibition, weight normalization, and adaptive thresholds.
+    Unsupervised training using STDP with lateral inhibition, weight normalization,
+    and adaptive threshold updates, plus extra debugging output.
     """
     input_size = 28 * 28  # for MNIST
     num_steps = int(T / dt)
@@ -258,7 +261,7 @@ def unsupervised_training_batched(train_dataset, n_neurons=100, num_epochs=10, T
         plt.ylabel("Number of Neurons")
         plt.show()
 
-        # Apply weight normalization and update thresholds adaptively
+        # Apply weight normalization and adapt thresholds
         layer.normalize_weights()
         layer.update_thresholds(firing_rates, target_rate=20.0, lr_thresh=0.01)
 
@@ -271,7 +274,7 @@ def unsupervised_training_batched(train_dataset, n_neurons=100, num_epochs=10, T
 def extract_features_batched(dataset, layer, T=T, dt=dt, max_rate=max_rate, device=device, batch_size=64):
     """
     Extract spike count features from the unsupervised SNN for every image in the dataset using batches.
-    Returns: features of shape (num_images, n_neurons) and corresponding labels.
+    Returns features: Tensor of shape (num_images, n_neurons), and labels.
     """
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
     feature_list = []
@@ -350,6 +353,7 @@ def evaluate_supervised(model, features, labels):
         global_predicted_labels = predicted.cpu().numpy().tolist()
 
         cm = confusion_matrix(global_true_labels, global_predicted_labels)
+
         plt.figure(figsize=(10, 8))
         classes = [str(i) for i in range(10)]
         sns.heatmap(cm, annot=True, fmt="d", cmap="Blues",
@@ -374,7 +378,7 @@ def visualize_raster(layer, img, T=T, dt=dt, max_rate=max_rate, device=device):
     Visualize spiking activity (raster plot) for a single image.
     """
     img = img.squeeze().to(device)
-    spike_train = poisson_encode(img, T, max_rate, dt, device)  # shape: (784, T)
+    spike_train = poisson_encode(img, T, max_rate, dt, device)  # (784, T)
     num_steps = int(T / dt)
     layer.reset()
     spikes_over_time = torch.zeros(layer.n_neurons, num_steps, device=device)
@@ -400,7 +404,7 @@ def visualize_raster(layer, img, T=T, dt=dt, max_rate=max_rate, device=device):
 # Main Script Execution
 # -------------------------------
 if __name__ == "__main__":
-    # Data augmentation + transformation for MNIST
+    # Data augmentation + transformation for MNIST.
     transform = transforms.Compose([
         transforms.RandomRotation(degrees=10),
         transforms.ToTensor()
@@ -410,14 +414,14 @@ if __name__ == "__main__":
 
     # Phase 1: Unsupervised Training (STDP with Adaptive Mechanisms)
     n_unsupervised_neurons = 100
-    unsup_epochs = 10  # Adjust as needed
+    unsup_epochs = 10
     start_time = time.time()
     unsup_layer = unsupervised_training_batched(train_dataset, n_neurons=n_unsupervised_neurons,
                                                 num_epochs=unsup_epochs, T=T, dt=dt, max_rate=max_rate,
                                                 device=device, batch_size=64)
     print(f"\nUnsupervised training completed in {(time.time() - start_time):.2f} seconds.")
 
-    # Phase 2: Feature Extraction – Batched
+    # Phase 2: Feature Extraction – Batched.
     print("\nExtracting features from unsupervised layer (training set)...")
     train_features, train_labels = extract_features_batched(train_dataset, unsup_layer, T=T, dt=dt,
                                                             max_rate=max_rate, device=device, batch_size=64)
@@ -428,17 +432,17 @@ if __name__ == "__main__":
                                                           max_rate=max_rate, device=device, batch_size=64)
     print(f"Extracted test feature shape: {test_features.shape}")
 
-    # Debug: PCA plot of extracted features
+    # Debug: PCA plot of extracted features.
     plot_features_PCA(train_features, train_labels)
 
     # Phase 3: Supervised Training (Linear Classifier)
-    sup_epochs = 10  # Adjust as needed
+    sup_epochs = 10
     lr = 0.01
     print("\nTraining supervised read-out (linear classifier) on extracted features...")
     classifier = supervised_training(train_features, train_labels, num_epochs=sup_epochs, lr=lr)
     evaluate_supervised(classifier, test_features, test_labels)
 
-    # Phase 4: Raster Plot Visualization
+    # Phase 4: Raster Plot Visualization for a Sample Image.
     sample_img, sample_label = test_dataset[0]
     print(f"\nVisualizing spiking activity for sample image with true label: {sample_label}")
     visualize_raster(unsup_layer, sample_img, T=T, dt=dt, max_rate=max_rate, device=device)
