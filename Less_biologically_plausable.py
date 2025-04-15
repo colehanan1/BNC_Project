@@ -65,12 +65,12 @@ if __name__ == '__main__':
 
     trainset = torchvision.datasets.CIFAR10(root='./data', train=True,
                                             download=True, transform=transform)
-    trainloader = torch.utils.data.DataLoader(trainset, batch_size=64,
+    trainloader = torch.utils.data.DataLoader(trainset, batch_size=128,
                                               shuffle=True, num_workers=2)
 
     testset = torchvision.datasets.CIFAR10(root='./data', train=False,
                                            download=True, transform=transform)
-    testloader = torch.utils.data.DataLoader(testset, batch_size=64,
+    testloader = torch.utils.data.DataLoader(testset, batch_size=128,
                                              shuffle=False, num_workers=2)
 
     # Initialize and train the CNN
@@ -78,7 +78,7 @@ if __name__ == '__main__':
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
     print("Training CNN...")
-    for epoch in range(50):  # 50 epochs
+    for epoch in range(100):  # 50 epochs
         running_loss = 0.0
         for i, data in enumerate(trainloader, 0):
             inputs, labels = data[0].to(device), data[1].to(device)
