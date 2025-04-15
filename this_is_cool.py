@@ -169,7 +169,7 @@ transform = transforms.Compose([
     transforms.ToTensor(),
     transforms.Normalize((0.5,), (0.5,))
 ])
-batch_size = 16
+batch_size = 2
 trainset = datasets.MNIST(root='./data', train=True, download=True, transform=transform)
 testset = datasets.MNIST(root='./data', train=False, download=True, transform=transform)
 # For troubleshooting multiprocessing issues on macOS, you can set num_workers=0.
