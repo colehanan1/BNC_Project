@@ -43,10 +43,10 @@ class BatchedDynamicThresholdLIF(nn.Module):
         num_neurons: Number of neurons in the layer.
         tau_m: Membrane time constant.
         v_rest: Resting membrane potential.
-        threshold0: Baseline firing threshold.
+        threshold0: Baseline threshold value.
         tau_thresh: Time constant for threshold recovery.
         beta: Increment added to threshold upon spiking.
-        dt: Time step (assumed 1.0 by default).
+        dt: Time step.
         """
         super(BatchedDynamicThresholdLIF, self).__init__()
         self.num_neurons = num_neurons
@@ -56,9 +56,9 @@ class BatchedDynamicThresholdLIF(nn.Module):
         self.tau_thresh = tau_thresh
         self.beta = beta
         self.dt = dt
-        # State variables will have shape (B, num_neurons) – batch dimension is initialized later.
-        self.membrane_potential = None
-        self.dynamic_threshold = None
+        # State variables: will be initialized for each batch during forward.
+        self.membrane_potential = None  # Shape: (B, num_neurons)
+        self.dynamic_threshold = None  # Shape: (B, num_neurons)
 
     def init_state(self, batch_size, device):
         self.membrane_potential = torch.full((batch_size, self.num_neurons), self.v_rest, device=device)
@@ -82,10 +82,10 @@ class BatchedDynamicThresholdLIF(nn.Module):
                     self.v_rest - self.membrane_potential) / self.tau_m + net_current * self.dt
         # Determine spikes based on dynamic threshold
         current_spikes = (self.membrane_potential >= self.dynamic_threshold).float()
-        # Update dynamic threshold: increase by beta where spikes occur; decay toward baseline.
+        # Update dynamic threshold: increase by beta where spikes occur and decay toward baseline.
         self.dynamic_threshold = self.dynamic_threshold + self.beta * current_spikes - (
                     (self.dynamic_threshold - self.threshold0) / self.tau_thresh) * self.dt
-        # Reset membrane potential for neurons that spiked
+        # Reset the membrane potential for neurons that spiked.
         self.membrane_potential = torch.where(current_spikes.bool(),
                                               torch.full_like(self.membrane_potential, self.v_rest),
                                               self.membrane_potential)
@@ -103,7 +103,7 @@ class BatchedDynamicThresholdLIF(nn.Module):
 class SNNModel(nn.Module):
     def __init__(self, input_size=784, num_neurons=100, output_size=10, T=100):
         """
-        input_size: Dimension of flattened MNIST image (28x28 = 784).
+        input_size: Dimension of flattened MNIST image (28x28=784).
         num_neurons: Number of hidden neurons.
         output_size: Number of output classes (10 for MNIST).
         T: Number of timesteps for simulation.
@@ -114,15 +114,15 @@ class SNNModel(nn.Module):
         self.output_size = output_size
         self.T = T
 
-        # Learnable weight matrix mapping input to hidden layer
+        # Learnable weight matrix mapping input to hidden neurons.
         self.input_weights = nn.Parameter(torch.rand(input_size, num_neurons))
-        # Hidden layer: using batched dynamic threshold LIF neurons.
+        # Hidden layer: batched dynamic threshold LIF neurons.
         self.hidden_layer = BatchedDynamicThresholdLIF(num_neurons)
-        # Fixed recurrent inhibitory matrix: shape (num_neurons, num_neurons)
+        # Fixed recurrent inhibitory matrix: shape (num_neurons, num_neurons).
         # Off-diagonals set to -0.5, diagonals 0.
         W_rec = -0.5 * (torch.ones(num_neurons, num_neurons) - torch.eye(num_neurons))
         self.register_buffer("W_rec", W_rec)
-        # Learnable output weights mapping summed hidden spikes to output logits.
+        # Learnable weight matrix mapping hidden spikes to output logits.
         self.output_weights = nn.Parameter(torch.rand(num_neurons, output_size))
 
     def forward(self, input_spikes):
@@ -137,30 +137,25 @@ class SNNModel(nn.Module):
             hidden_spike_record: Tensor of shape (T, B, num_neurons) (for visualization)
         """
         T, B, _ = input_spikes.shape
-        # Reset hidden state at the start of a forward pass.
         self.hidden_layer.reset_state()
-        # Initialize previous hidden spikes as zeros.
         previous_hidden = torch.zeros(B, self.num_neurons, device=input_spikes.device)
         hidden_spike_record = []
 
         for t in range(T):
             # Compute feedforward input: shape (B, num_neurons)
             input_current = torch.matmul(input_spikes[t], self.input_weights)
-            # Compute recurrent inhibitory input from previous hidden spikes:
+            # Compute recurrent inhibitory input from previous hidden spikes.
             recurrent_current = torch.matmul(previous_hidden, self.W_rec)
             # Total net current:
             net_current = input_current + recurrent_current
-            # Single time step update using dynamic threshold neuron.
+            # Single timestep update:
             current_hidden = self.hidden_layer.forward_step(net_current)
             hidden_spike_record.append(current_hidden)
             previous_hidden = current_hidden
 
-        # Stack the spike records: shape (T, B, num_neurons)
-        hidden_spikes_tensor = torch.stack(hidden_spike_record, dim=0)
-        # Sum over timesteps to get spike counts per neuron: shape (B, num_neurons)
-        spike_counts = hidden_spikes_tensor.sum(dim=0)
-        # Compute output logits: shape (B, output_size)
-        logits = torch.matmul(spike_counts, self.output_weights)
+        hidden_spikes_tensor = torch.stack(hidden_spike_record, dim=0)  # shape: (T, B, num_neurons)
+        spike_counts = hidden_spikes_tensor.sum(dim=0)  # shape: (B, num_neurons)
+        logits = torch.matmul(spike_counts, self.output_weights)  # shape: (B, output_size)
         return logits, hidden_spikes_tensor
 
     def reset(self):
@@ -171,17 +166,18 @@ class SNNModel(nn.Module):
 # Data Loading (MNIST 28x28)
 # =============================================================================
 transform = transforms.Compose([
-    transforms.ToTensor(),  # MNIST: 1x28x28
+    transforms.ToTensor(),
     transforms.Normalize((0.5,), (0.5,))
 ])
-batch_size = 256
+batch_size = 16
 trainset = datasets.MNIST(root='./data', train=True, download=True, transform=transform)
 testset = datasets.MNIST(root='./data', train=False, download=True, transform=transform)
-trainloader = torch.utils.data.DataLoader(trainset, batch_size=batch_size, shuffle=True, num_workers=2)
-testloader = torch.utils.data.DataLoader(testset, batch_size=batch_size, shuffle=False, num_workers=2)
+# For troubleshooting multiprocessing issues on macOS, you can set num_workers=0.
+trainloader = torch.utils.data.DataLoader(trainset, batch_size=batch_size, shuffle=True, num_workers=0)
+testloader = torch.utils.data.DataLoader(testset, batch_size=batch_size, shuffle=False, num_workers=0)
 
 # =============================================================================
-# Device Setup: MPS for M2 Apple GPU if available
+# Device Setup: Use MPS (M2 Apple GPU)
 # =============================================================================
 device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
 print(f"Using device: {device}")
@@ -195,22 +191,16 @@ criterion = nn.CrossEntropyLoss()
 
 
 # =============================================================================
-# Training Function
+# Training Function (Batched)
 # =============================================================================
 def train_snn(model, dataloader, num_epochs=10):
     model.train()
     for epoch in range(num_epochs):
         total_loss = 0.0
         for idx, (imgs, labels) in enumerate(dataloader):
-            # imgs: shape (B, 1, 28, 28) -> flatten to (B, 784)
-            imgs = imgs.view(imgs.size(0), -1).to(device)
-            # Poisson encode: shape (T, B, 784)
-            input_spikes = poisson_encode_batch(imgs, T=model.T, max_rate=100)
-
-            # Reset the network state
+            imgs = imgs.view(imgs.size(0), -1).to(device)  # shape: (B, 784)
+            input_spikes = poisson_encode_batch(imgs, T=model.T, max_rate=100)  # shape: (T, B, 784)
             model.reset()
-
-            # Forward pass: get logits and hidden spike record (for optional logging)
             logits, _ = model(input_spikes)
             loss = criterion(logits, labels.to(device))
 
@@ -219,18 +209,15 @@ def train_snn(model, dataloader, num_epochs=10):
             optimizer.step()
 
             total_loss += loss.item()
-
             if (idx + 1) % 10 == 0:
                 print(
                     f"Epoch [{epoch + 1}/{num_epochs}] Batch [{idx + 1}/{len(dataloader)}] Loss: {total_loss / (idx + 1):.4f}")
-
-            # Optional: clear temporary memory (helps avoid MPS OOM in long runs)
             gc.collect()
         print(f"Epoch [{epoch + 1}/{num_epochs}] Average Loss: {total_loss / len(dataloader):.4f}")
 
 
 # =============================================================================
-# Evaluation Function & Visualization of Hidden Spike Patterns
+# Evaluation Function (Batched) & Visualization
 # =============================================================================
 def evaluate_snn(model, dataloader):
     model.eval()
@@ -238,8 +225,7 @@ def evaluate_snn(model, dataloader):
     total = 0
     all_preds = []
     all_labels = []
-    # We'll also record the average hidden spike pattern per sample.
-    hidden_patterns = []  # List for spike count distributions per sample.
+    hidden_patterns = []  # For storing hidden spike count patterns.
     with torch.no_grad():
         for imgs, labels in dataloader:
             imgs = imgs.view(imgs.size(0), -1).to(device)
@@ -251,10 +237,8 @@ def evaluate_snn(model, dataloader):
             correct += (predicted.cpu() == labels).sum().item()
             all_preds.extend(predicted.cpu().tolist())
             all_labels.extend(labels.tolist())
-            # Record average hidden spike counts (over time) for visualization.
             spike_counts = hidden_spike_record.sum(dim=0)  # shape: (B, num_neurons)
             hidden_patterns.append(spike_counts.cpu())
-
     accuracy = 100 * correct / total
     print(f"SNN Accuracy on test set: {accuracy:.2f}%")
 
@@ -267,7 +251,6 @@ def evaluate_snn(model, dataloader):
     plt.title("Confusion Matrix")
     plt.show()
 
-    # Concatenate all hidden patterns and visualize a sample distribution.
     hidden_patterns = torch.cat(hidden_patterns, dim=0)  # shape: (N_total, num_neurons)
     plt.figure(figsize=(8, 4))
     plt.imshow(hidden_patterns.T, aspect='auto', cmap='viridis')
@@ -279,7 +262,9 @@ def evaluate_snn(model, dataloader):
 
 
 # =============================================================================
-# Run Training and Evaluation
+# Main Execution
 # =============================================================================
-train_snn(model, trainloader, num_epochs=10)
-evaluate_snn(model, testloader)
+if __name__ == "__main__":
+    # It's crucial to protect the main module for multiprocessing (especially on macOS)
+    train_snn(model, trainloader, num_epochs=2)
+    evaluate_snn(model, testloader)
