@@ -74,7 +74,7 @@ class SNNModel(nn.Module):
         return output_spikes
 
     def reset(self):
-        self.hidden_layer.membrane_potential.fill(self.hidden_layer.v_rest)  # Reset hidden layer membrane potential
+        self.hidden_layer.membrane_potential.fill_(self.hidden_layer.v_rest)  # Reset hidden layer membrane potential
 
 
 # Data loading and encoding
