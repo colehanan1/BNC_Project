@@ -62,8 +62,8 @@ class SNNModel(nn.Module):
         # Create LIF neurons for the hidden layer
         self.hidden_layer = LIFNeuronModel(num_neurons)
 
-        # Output layer with simple connections
-        self.output_weights = torch.rand(num_neurons, output_size)
+        # Output layer with learnable parameters (weights)
+        self.output_weights = nn.Parameter(torch.rand(num_neurons, output_size))  # This is now a learnable parameter
 
     def forward(self, input_spikes):
         # Process input spikes through the hidden layer
