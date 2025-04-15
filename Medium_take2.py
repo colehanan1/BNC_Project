@@ -107,7 +107,7 @@ def train_snn(model, trainloader, num_epochs=10):
             inputs = inputs.view(-1, 784).to(device)  # Flatten image to 1D vector and move to MPS device
 
             # Poisson encoding for input spikes
-            input_spikes = torch.tensor(poisson_encode(inputs.numpy(), T=100), dtype=torch.float32).to(device)
+            input_spikes = torch.tensor(poisson_encode(inputs.cpu().numpy(), T=100), dtype=torch.float32).to(device)
 
             # Reset the hidden layer's membrane potential at the start of each batch
             model.reset()
