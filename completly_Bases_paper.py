@@ -379,20 +379,40 @@ def test_network():
 
     total = 0
     correct = 0
-    for image, label in test_loader:
-        image_np = image.squeeze(0).numpy().astype(np.uint8)
-        true_label = label.item()
-        spike_rates = retina.process_image(image_np)
-        retina_spike_train = retina.generate_spike_train(spike_rates, CONFIG["simulation"]["t_total"],
-                                                         CONFIG["simulation"]["dt"])
-        network.reset_state()
-        predicted_class, _ = network.run_simulation(retina_spike_train, reward=0.0, verbose=False)
-        total += 1
-        if predicted_class == true_label:
-            correct += 1
+    print(f"Starting test evaluation over {len(test_dataset)} samples.")
 
-    acc = correct / total
-    print(f"Test Accuracy: {acc:.2f}")
+    for idx, (image, label) in enumerate(test_loader):
+        try:
+            image_np = image.squeeze(0).numpy().astype(np.uint8)
+            true_label = label.item()
+            spike_rates = retina.process_image(image_np)
+            retina_spike_train = retina.generate_spike_train(spike_rates,
+                                                             CONFIG["simulation"]["t_total"],
+                                                             CONFIG["simulation"]["dt"])
+            # Reset network state before each sample.
+            network.reset_state()
+            predicted_class, _ = network.run_simulation(retina_spike_train, reward=0.0, verbose=False)
+
+            total += 1
+            if predicted_class == true_label:
+                correct += 1
+
+            # Debugging output every 100 samples.
+            if total % 100 == 0:
+                print(
+                    f"[{total}/{len(test_dataset)}] Processed sample {total}: True label = {true_label}, Predicted = {predicted_class}, Running accuracy = {correct / total:.2f}")
+
+        except Exception as e:
+            print(f"Error processing sample idx {idx}.")
+            print(f"True label: {label.item()}, current predicted state may be undefined.")
+            print(f"Spike rates shape: {spike_rates.shape if 'spike_rates' in locals() else 'N/A'}")
+            print(
+                f"Retina spike train shape: {retina_spike_train.shape if 'retina_spike_train' in locals() else 'N/A'}")
+            print("Error message:", e)
+            raise e  # Re-raise so that the testing terminates with full traceback if desired.
+
+    acc = correct / total if total > 0 else 0.0
+    print(f"Final Test Accuracy: {acc:.2f}")
 
 
 # -------------------- Main Routine --------------------
