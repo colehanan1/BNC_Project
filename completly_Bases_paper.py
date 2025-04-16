@@ -14,6 +14,8 @@ import torchvision
 import torchvision.transforms as transforms
 import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader
+import pytest
+
 
 # Set device to MPS (Apple M2 GPU) if available, otherwise use CPU.
 device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
@@ -365,55 +367,73 @@ def train_network():
     return network
 
 
-# -------------------- Testing Loop --------------------
+# -------------------- Fixture for Training --------------------
+@pytest.fixture(scope="session")
+def network():
+    """
+    Session-scoped fixture: trains the network once per pytest session.
+    Returns the trained PSACNetworkGPU instance.
+    """
+    # train_network() comes from your main script
+    trained = train_network()
+    return trained
 
-def test_network():
-    network = PSACNetworkGPU(CONFIG, device)
+# -------------------- Testing Loop --------------------
+def test_network(network):
+    """
+    Pytest test function: evaluates the pre-trained 'network' fixture.
+    """
+    # Reset state before evaluation
+    network.reset_state()
+    evaluate_network(network)
+
+# -------------------- Evaluation Loop --------------------
+def evaluate_network(network):
+    """
+    Evaluate a pre-trained PSACNetworkGPU on the MNIST test set with detailed debugging.
+    """
     transform = transforms.Compose([
         transforms.ToTensor(),
         transforms.Lambda(lambda x: x.squeeze(0) * 255)
     ])
-    test_dataset = torchvision.datasets.MNIST(root="./data", train=False, download=True, transform=transform)
+    test_dataset = torchvision.datasets.MNIST(
+        root="./data", train=False, download=True, transform=transform)
     test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False)
     retina = Retina(CONFIG)
 
-    total = 0
-    correct = 0
-    print(f"Starting test evaluation over {len(test_dataset)} samples.")
+    total, correct = 0, 0
+    print(f"▶️ Starting evaluation over {len(test_dataset)} samples.")
 
     for idx, (image, label) in enumerate(test_loader):
         try:
-            image_np = image.squeeze(0).numpy().astype(np.uint8)
+            img_np = image.squeeze(0).numpy().astype(np.uint8)
             true_label = label.item()
-            spike_rates = retina.process_image(image_np)
-            retina_spike_train = retina.generate_spike_train(spike_rates,
-                                                             CONFIG["simulation"]["t_total"],
-                                                             CONFIG["simulation"]["dt"])
-            # Reset network state before each sample.
+
+            # Retina preprocessing
+            rates = retina.process_image(img_np)
+            spikes = retina.generate_spike_train(
+                rates, CONFIG["simulation"]["t_total"], CONFIG["simulation"]["dt"]
+            )
+
+            # Reset and run simulation
             network.reset_state()
-            predicted_class, _ = network.run_simulation(retina_spike_train, reward=0.0, verbose=False)
+            pred, _ = network.run_simulation(spikes, reward=0.0)
 
             total += 1
-            if predicted_class == true_label:
-                correct += 1
+            correct += (pred == true_label)
 
-            # Debugging output every 100 samples.
+            # Progress report every 100 samples
             if total % 100 == 0:
-                print(
-                    f"[{total}/{len(test_dataset)}] Processed sample {total}: True label = {true_label}, Predicted = {predicted_class}, Running accuracy = {correct / total:.2f}")
+                acc = correct / total
+                print(f"[{total}/{len(test_dataset)}] True={true_label}, Pred={pred}, Acc={acc:.2f}")
 
         except Exception as e:
-            print(f"Error processing sample idx {idx}.")
-            print(f"True label: {label.item()}, current predicted state may be undefined.")
-            print(f"Spike rates shape: {spike_rates.shape if 'spike_rates' in locals() else 'N/A'}")
-            print(
-                f"Retina spike train shape: {retina_spike_train.shape if 'retina_spike_train' in locals() else 'N/A'}")
-            print("Error message:", e)
-            raise e  # Re-raise so that the testing terminates with full traceback if desired.
+            print(f"❌ Error at sample {idx}: True label={true_label}")
+            print(f"   rates.shape={rates.shape}, spikes.shape={spikes.shape}")
+            print("   Error:", e)
+            raise
 
-    acc = correct / total if total > 0 else 0.0
-    print(f"Final Test Accuracy: {acc:.2f}")
-
+    print(f"✅ Final Evaluation Accuracy: {correct/total:.2f}")
 
 # -------------------- Main Routine --------------------
 
@@ -421,7 +441,7 @@ if __name__ == "__main__":
     # Train the network on MNIST.
     trained_network = train_network()
     # Evaluate on the test set.
-    test_network(trained_network)
+    evaluate_network(trained_network)
 
     # Optionally, visualize an example’s output spike counts.
     # Here we take the first test sample.
