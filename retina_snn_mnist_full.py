@@ -183,25 +183,28 @@ class SpikingNetwork:
             self.trace_pre.zero_(); self.trace_post.zero_()
             self.e_trace.zero_()
 
+            total_spikes = torch.zeros(self.N_exc, device=device)
+
             for t in range(T):
                 pre = spike_train[:, t]
                 s_exc, _ = self.simulate_step(pre)
+                # Accumulate excitatory spikes
+                total_spikes += s_exc
+                # Unsupervised STDP on hidden layer
                 self.stdp_update(pre, s_exc)
-                # output layer LIF and record spikes
-                # we don't use output membrane for classification in STDP, only eligibility
+                # Reward-modulated eligibility update
                 out_current = self.W_exc2out.t() @ s_exc
-                # surrogate spike generation for eligibility (soft threshold)
                 out_spike = (out_current >= self.v_thr).float()
                 self.update_eligibility(s_exc, out_spike)
-                spikes_per_class[label] += s_exc
 
-            # classification and R-STDP reward
-            total_spikes = spike_train.sum(dim=1)  # unused here
             # evaluate hidden→output votes
-            votes = (spike_train.sum(dim=1)[:,None] * self.W_exc2out).sum(dim=0)
-            pred = votes.argmax().item()
-            reward = 1.0 if pred == label else -1.0
-            self.apply_rstdp(reward)
+                # Supervised R-STDP: compute reward
+                votes = (total_spikes.unsqueeze(1) * self.W_exc2out).sum(dim=0)
+                pred = votes.argmax().item()
+                reward = 1.0 if pred == label else -1.0
+                self.apply_rstdp(reward)
+
+                spikes_per_class[label] += total_spikes  # for Hebbian readout if used
 
             if (idx+1) % 10 == 0:
                 print(f"[Train] processed {idx+1}/{num_samples}")
