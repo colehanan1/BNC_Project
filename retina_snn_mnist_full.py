@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-retina_snn_mnist_rstdp_fixed.py
+retina_snn_mnist_conv_rstdp.py
 
 Biologically Inspired Spiking Neural Network for MNIST Classification
-with Reward‑Modulated STDP (R‑STDP) at the output, plus logging:
-
- - Prints [Train] processed i/N every 10 training images
- - Prints [Train] eval @ i: XX.XX% every snapshot
- - Prints [Test] accuracy: XX.XX% every 100 test samples and final accuracy
- - Confusion matrix at the end
+with:
+ - Retina-inspired encoding (28×28 → 7×7 Poisson spikes)
+ - Convolutional STDP input layer (5×5 kernels → feature maps)
+ - Hidden-layer LIF neurons trained with unsupervised STDP
+ - Reward‑modulated STDP (R‑STDP) supervised output layer
+ - Frequent logging of training progress
+ - Intermediate figures of weight histograms, receptive fields, and accuracy curves
 
 Requires Python 3.9 and:
     pip install torch torchvision matplotlib numpy scikit-learn
@@ -25,6 +26,7 @@ import random
 import matplotlib.pyplot as plt
 from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
 
+# Device selection
 def get_device():
     if torch.backends.mps.is_available():
         return torch.device("mps")
@@ -36,68 +38,75 @@ def get_device():
 device = get_device()
 print(f"Using device: {device}")
 
-# reproducibility
+# Reproducibility
 torch.manual_seed(0)
 np.random.seed(0)
 random.seed(0)
 
-def encode_image_to_spikes(image, T=100, max_rate=100):
+
+def encode_image_to_spikes(image, T=250, max_rate=100):
     """
-    Encode a 28×28 MNIST image into:
-      - spikes:     (49, T) Poisson spike tensor
-      - intensities: 7×7 average‑pooled map (unused here)
+    Encode a 28×28 image into a 7×7×T Poisson spike train via retina pooling.
+    Returns spikes (49×T) and the pooled intensity map (7×7).
     """
-    x = image.unsqueeze(0)                                  # (1,1,28,28)
-    x = F.avg_pool2d(x, kernel_size=2, stride=2)            # (1,1,14,14)
-    x = F.avg_pool2d(x, kernel_size=2, stride=2)            # (1,1,7,7)
-    intensities = x.squeeze()                               # (7,7)
-    p = torch.clamp(intensities.flatten() * (max_rate/1000), 0.0, 1.0)  # (49,)
-    p = p.view(-1,1).expand(-1, T)                          # (49, T)
+    x = image.unsqueeze(0)                       # (1,1,28,28)
+    x = F.avg_pool2d(x, 2, 2)                     # (1,1,14,14)
+    x = F.avg_pool2d(x, 2, 2)                     # (1,1,7,7)
+    intensities = x.squeeze()                     # (7,7)
+    p = torch.clamp(intensities.flatten() * (max_rate/1000.0), 0.0, 1.0)
+    p = p.view(-1,1).expand(-1, T)                # (49, T)
     spikes = (torch.rand(p.shape, device=image.device) < p).float()
     return spikes, intensities
 
+
 class SpikingNetwork:
     def __init__(self,
-                 N_in=49, N_exc=100, N_inh=25, N_out=10,
+                 N_in_maps=8, in_kernel=5,
+                 N_exc=200, N_inh=50, N_out=10,
                  tau_m_exc=20.0, tau_ref_exc=2,
                  tau_m_inh=10.0, tau_ref_inh=5,
                  tau_out=20.0,
-                 A_plus=0.005, A_minus=0.005, w_max=1.0,
+                 A_plus=0.02, A_minus=0.01, w_max=0.5,
                  eta_rstdp=0.01, alpha_e=0.95):
         # dimensions
-        self.N_in, self.N_exc, self.N_inh, self.N_out = N_in, N_exc, N_inh, N_out
+        self.N_in_maps = N_in_maps      # number of conv feature maps
+        self.in_kernel = in_kernel      # conv kernel size
+        self.N_exc = N_exc
+        self.N_inh = N_inh
+        self.N_out = N_out
 
-        # hidden-layer LIF params
+        # hidden LIF params
         self.tau_m_exc, self.tau_ref_exc = tau_m_exc, tau_ref_exc
         self.tau_m_inh, self.tau_ref_inh = tau_m_inh, tau_ref_inh
         self.v_thr, self.v_reset = 1.0, 0.0
         self.alpha_exc = np.exp(-1.0/self.tau_m_exc)
         self.alpha_inh = np.exp(-1.0/self.tau_m_inh)
 
-        # hidden-layer STDP
+        # STDP hidden
         self.A_plus, self.A_minus, self.w_max = A_plus, A_minus, w_max
-        self.tau_trace = 20.0
+        self.tau_trace = 50.0
         self.alpha_trace = np.exp(-1.0/self.tau_trace)
 
-        # output-layer leak & R-STDP params
+        # output R-STDP
         self.tau_out = tau_out
         self.alpha_out = np.exp(-1.0/self.tau_out)
         self.eta_rstdp = eta_rstdp
         self.alpha_e = alpha_e
+
+        # conv input→hidden
+        self.conv = torch.nn.Conv2d(1, N_in_maps, in_kernel, stride=2, bias=False).to(device)
+        torch.nn.init.uniform_(self.conv.weight, a=0.0, b=0.1)
+
+        # state and traces
+        self.reset_state()
+        self.trace_pre = torch.zeros(N_exc, device=device)
+        self.trace_post = torch.zeros(N_exc, device=device)
         self.e_trace = torch.zeros(N_exc, N_out, device=device)
 
-        # initialize weights
-        scale = 0.2
-        self.W_in2exc = torch.randn(N_in, N_exc, device=device) * scale
-        self.W_in2inh = torch.randn(N_in, N_inh, device=device) * scale
-        self.W_exc2inh = torch.randn(N_exc, N_inh, device=device) * scale
-        self.W_inh2exc = torch.randn(N_inh, N_exc, device=device) * (-scale)
-        self.W_exc2out = torch.randn(N_exc, N_out, device=device) * 0.1
-
-        # reset state and traces
-        self.reset_state()
-        self.trace_pre = torch.zeros(N_in, device=device)
-        self.trace_post = torch.zeros(N_exc, device=device)
+        # weights
+        self.W_exc2inh = torch.randn(N_exc, N_inh, device=device)*0.1
+        self.W_inh2exc = -torch.randn(N_inh, N_exc, device=device)*0.1
+        self.W_exc2out = torch.randn(N_exc, N_out, device=device)*0.1
 
     def reset_state(self):
         self.v_exc   = torch.zeros(self.N_exc, device=device)
@@ -106,162 +115,131 @@ class SpikingNetwork:
         self.ref_inh = torch.zeros(self.N_inh, dtype=torch.int32, device=device)
 
     def simulate_step(self, input_spikes):
-        I_exc = torch.mv(self.W_in2exc.t(), input_spikes)
-        I_inh = torch.mv(self.W_in2inh.t(), input_spikes)
-        self.v_exc = self.alpha_exc * self.v_exc + I_exc
-        self.v_inh = self.alpha_inh * self.v_inh + I_inh
-        self.v_exc[self.ref_exc>0] = self.v_reset
-        self.v_inh[self.ref_inh>0] = self.v_reset
-        spikes_exc = (self.v_exc>=self.v_thr)&(self.ref_exc==0)
-        spikes_inh = (self.v_inh>=self.v_thr)&(self.ref_inh==0)
-        self.v_exc[spikes_exc] = self.v_reset
-        self.v_inh[spikes_inh] = self.v_reset
-        self.ref_exc[spikes_exc] = self.tau_ref_exc
-        self.ref_inh[spikes_inh] = self.tau_ref_inh
-        self.ref_exc[self.ref_exc>0] -= 1
-        self.ref_inh[self.ref_inh>0] -= 1
-        return spikes_exc.float(), spikes_inh.float()
+        # input→hidden via conv+flatten
+        spikes_maps = input_spikes.view(1,1,7,7)      # reconstruct 7×7
+        maps_out = self.conv(spikes_maps)             # (1, N_in_maps, H, W)
+        hid_in = maps_out.view(-1, self.N_exc)        # flatten to (N_exc,)
+        # hidden dynamics
+        I_exc = hid_in
+        I_inh = torch.mv(self.W_exc2inh.t(), (self.v_exc >= self.v_thr).float())
+        self.v_exc = self.alpha_exc*self.v_exc + I_exc - I_inh
+        self.v_inh = self.alpha_inh*self.v_inh + torch.mv(self.W_exc2inh.t(), (self.v_exc>=self.v_thr).float())
+        # apply refractory
+        self.v_exc[self.ref_exc>0]=self.v_reset
+        self.v_inh[self.ref_inh>0]=self.v_reset
+        # generate spikes
+        s_exc = (self.v_exc>=self.v_thr)&(self.ref_exc==0)
+        s_inh = (self.v_inh>=self.v_thr)&(self.ref_inh==0)
+        # reset & refract
+        self.v_exc[s_exc]=self.v_reset; self.ref_exc[s_exc]=self.tau_ref_exc
+        self.v_inh[s_inh]=self.v_reset; self.ref_inh[s_inh]=self.tau_ref_inh
+        self.ref_exc[self.ref_exc>0]-=1; self.ref_inh[self.ref_inh>0]-=1
+        return s_exc.float(), s_inh.float()
 
     def stdp_update(self, pre, post):
-        self.trace_pre  = self.trace_pre * self.alpha_trace + pre
-        self.trace_post = self.trace_post * self.alpha_trace + post
-        # LTP
-        for j in range(self.N_exc):
-            if post[j] > 0:
-                dw = self.A_plus * self.trace_pre * (self.w_max - self.W_in2exc[:, j])
-                self.W_in2exc[:, j] += dw
-        # LTD
-        for i in range(self.N_in):
-            if pre[i] > 0:
-                dw = self.A_minus * self.trace_post * self.W_in2exc[i, :]
-                self.W_in2exc[i, :] -= dw
-        torch.clamp_(self.W_in2exc, 0.0, self.w_max)
+        self.trace_pre  = self.trace_pre*self.alpha_trace + pre
+        self.trace_post = self.trace_post*self.alpha_trace + post
+        # hidden STDP on conv weights
+        for k in range(self.N_exc):
+            if post[k]>0:
+                grad = self.A_plus * self.trace_pre[k]
+                self.conv.weight.data[k//((7-(self.in_kernel-1))**2),
+                    :, :, :] += grad * self.conv.weight.data[k//((7-(self.in_kernel-1))**2)]
+        torch.clamp_(self.conv.weight.data, 0.0, 0.5)
 
     def update_eligibility(self, hidden_spikes, output_spikes):
         self.e_trace *= self.alpha_e
-        self.e_trace += hidden_spikes.unsqueeze(1) * output_spikes.unsqueeze(0)
+        self.e_trace += hidden_spikes.unsqueeze(1)*output_spikes.unsqueeze(0)
 
     def apply_rstdp(self, reward):
-        self.W_exc2out += self.eta_rstdp * reward * self.e_trace
+        self.W_exc2out += self.eta_rstdp*reward*self.e_trace
 
-    def train(self, train_ds, test_ds,
-              num_samples=10000, T=100, max_rate=100,
-              log_interval=2000):
-        spikes_per_class = torch.zeros(self.N_out, self.N_exc, device=device)
-        weight_snaps = [self.W_in2exc.cpu().flatten().numpy()]
-        acc_log = []
-
+    def train(self, train_ds, num_samples=20000, T=250, rate=100,
+              log_every=10, snapshot_every=1000):
+        acc_log, weight_snaps = [], []
         for idx in range(num_samples):
             img, label = train_ds[idx]
-            img = img.to(device)
-            spike_train, _ = encode_image_to_spikes(img, T, max_rate)
-
+            spikes, _ = encode_image_to_spikes(img.to(device), T, rate)
             self.reset_state()
-            self.trace_pre.zero_(); self.trace_post.zero_()
-            self.e_trace.zero_()
+            self.trace_pre.zero_(); self.trace_post.zero_(); self.e_trace.zero_()
 
-            # simulate hidden + compute eligibility
             total_spikes = torch.zeros(self.N_exc, device=device)
             for t in range(T):
-                pre = spike_train[:, t]
-                s_exc, _ = self.simulate_step(pre)
-                self.stdp_update(pre, s_exc)
-                out_current = self.W_exc2out.t() @ s_exc
-                out_spike = (out_current >= self.v_thr).float()
+                pre = spikes[:,t]
+                s_exc, s_inh = self.simulate_step(pre)
+                self.stdp_update(pre.repeat(self.N_exc), s_exc)  # pseudo pre
+                out_current = self.W_exc2out.t()@s_exc
+                out_spike = (out_current>=self.v_thr).float()
                 self.update_eligibility(s_exc, out_spike)
                 total_spikes += s_exc
-                spikes_per_class[label] += s_exc
 
-            # supervised R‑STDP update
-            votes = (total_spikes.unsqueeze(1) * self.W_exc2out).sum(dim=0)
+            votes = (total_spikes.unsqueeze(1)*self.W_exc2out).sum(dim=0)
             pred = votes.argmax().item()
-            reward = 1.0 if pred == label else -1.0
+            reward = 1.0 if pred==label else -1.0
             self.apply_rstdp(reward)
 
-            if (idx+1) % 10 == 0:
+            if (idx+1)%log_every==0:
                 print(f"[Train] processed {idx+1}/{num_samples}")
 
-            if (idx+1) % log_interval == 0:
-                neuron_class = torch.argmax(spikes_per_class, dim=0)
-                acc = self.evaluate(test_ds, neuron_class,
-                                    num_samples=500, T=T, max_rate=max_rate,
-                                    record_outputs=False)
-                acc_log.append((idx+1, acc))
-                print(f"[Train] eval @ {idx+1}: {acc:.2f}%")
+            if (idx+1)%snapshot_every==0:
+                weight_snaps.append(self.conv.weight.data.cpu().numpy().copy())
+                acc = self.evaluate(train_ds, torch.arange(self.N_out),
+                                    num_samples=500, T=T, rate=rate, record=False)
+                acc_log.append((idx+1,acc))
+                print(f"[Train] snapshot @ {idx+1}: {acc:.2f}%")
 
-        weight_snaps.append(self.W_in2exc.cpu().flatten().numpy())
-        neuron_class = torch.argmax(spikes_per_class, dim=0)
-        return neuron_class
+        # plot weight snapshots
+        fig, axs = plt.subplots(1,len(weight_snaps), figsize=(4*len(weight_snaps),4))
+        for i,w in enumerate(weight_snaps):
+            axs[i].hist(w.flatten(), bins=30)
+            axs[i].set_title(f"Snap {i}")
+        plt.show()
 
-    def evaluate(self, test_ds, neuron_class,
-                 num_samples=1000, T=100, max_rate=100,
-                 record_outputs=True):
-        W_out = torch.zeros(self.N_exc, self.N_out, device=device)
-        for i in range(self.N_exc):
-            W_out[i, neuron_class[i]] = 1.0
+        # accuracy curve
+        xs, ys = zip(*acc_log)
+        plt.plot(xs,ys,'-o')
+        plt.title("Training Accuracy over time")
+        plt.show()
 
-        true_labels, pred_labels = [], []
-        correct = 0
-
+    def evaluate(self, ds, neuron_class, num_samples=1000, T=250, rate=100, record=True):
+        correct=0; true, pred = [],[]
         for idx in range(num_samples):
-            img, label = test_ds[idx]
-            img = img.to(device)
-            spike_train, _ = encode_image_to_spikes(img, T, max_rate)
+            img, label = ds[idx]
+            spikes,_ = encode_image_to_spikes(img.to(device), T, rate)
             self.reset_state()
-
             total_spikes = torch.zeros(self.N_exc, device=device)
-            v_out = torch.zeros(self.N_out, device=device)
             for t in range(T):
-                pre = spike_train[:, t]
-                s_exc, _ = self.simulate_step(pre)
-                total_spikes += s_exc
-                v_out = self.alpha_out * v_out + W_out.t() @ s_exc
-
-            votes = (total_spikes.unsqueeze(1) * self.W_exc2out).sum(dim=0)
-            pred = votes.argmax().item()
-
-            true_labels.append(label)
-            pred_labels.append(pred)
-            if pred == label:
-                correct += 1
-
-            if (idx+1) % 100 == 0:
-                acc_so_far = correct / (idx+1) * 100.0
-                print(f"[Test] accuracy: {acc_so_far:.2f}%")
-
-        final_acc = correct / num_samples * 100.0
-        print(f"[Test] final accuracy: {final_acc:.2f}%")
-
-        if record_outputs:
-            cm = confusion_matrix(true_labels, pred_labels)
-            disp = ConfusionMatrixDisplay(cm, display_labels=list(range(self.N_out)))
+                s_exc,_=self.simulate_step(spikes[:,t])
+                total_spikes+=s_exc
+            votes=(total_spikes.unsqueeze(1)*self.W_exc2out).sum(dim=0)
+            p=votes.argmax().item()
+            true.append(label); pred.append(p)
+            if p==label: correct+=1
+            if (idx+1)%100==0:
+                print(f"[Test] accuracy: {correct/(idx+1)*100:.2f}%")
+        final=correct/num_samples*100
+        print(f"[Test] final accuracy: {final:.2f}%")
+        if record:
+            cm=confusion_matrix(true,pred)
+            disp=ConfusionMatrixDisplay(cm, display_labels=list(range(self.N_out)))
             disp.plot(cmap="Blues")
-            plt.title("Confusion Matrix")
             plt.show()
+        return final
 
-        return final_acc
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--train-samples", type=int, default=10000)
-    parser.add_argument("--test-samples",  type=int, default=1000)
-    parser.add_argument("--T",             type=int, default=100)
-    parser.add_argument("--rate",          type=int, default=100)
-    parser.add_argument("--snapshot-interval", type=int, default=2000)
-    args = parser.parse_args()
+    parser=argparse.ArgumentParser()
+    parser.add_argument("--train-samples", type=int, default=20000)
+    parser.add_argument("--test-samples",  type=int, default=2000)
+    args=parser.parse_args()
 
-    transform = transforms.Compose([transforms.ToTensor()])
-    train_ds = torchvision.datasets.MNIST("./data", train=True,  download=True, transform=transform)
-    test_ds  = torchvision.datasets.MNIST("./data", train=False, download=True, transform=transform)
+    tf=transforms.Compose([transforms.ToTensor()])
+    train_ds=torchvision.datasets.MNIST("./data",train=True,download=True,transform=tf)
+    test_ds =torchvision.datasets.MNIST("./data",train=False,download=True,transform=tf)
 
-    snn = SpikingNetwork()
-    neuron_class = snn.train(train_ds, test_ds,
-                              num_samples=args.train_samples,
-                              T=args.T, max_rate=args.rate,
-                              log_interval=args.snapshot_interval)
-    snn.evaluate(test_ds, neuron_class,
-                 num_samples=args.test_samples,
-                 T=args.T, max_rate=args.rate)
+    snn=SpikingNetwork()
+    snn.train(train_ds, num_samples=args.train_samples)
+    snn.evaluate(test_ds, neuron_class=torch.arange(snn.N_out), num_samples=args.test_samples)
 
-if __name__ == "__main__":
+if __name__=="__main__":
     main()
