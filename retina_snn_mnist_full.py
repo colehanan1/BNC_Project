@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
 """
-retina_snn_mnist_rstdp.py
+retina_snn_mnist_rstdp_fixed.py
 
 Biologically Inspired Spiking Neural Network for MNIST Classification
 with Reward‑Modulated STDP (R‑STDP) at the output, plus logging:
 
  - Prints [Train] processed i/N every 10 training images
- - Prints [Test] accuracy: XX.XX% every 100 test samples
+ - Prints [Train] eval @ i: XX.XX% every snapshot
+ - Prints [Test] accuracy: XX.XX% every 100 test samples and final accuracy
+ - Confusion matrix at the end
+
+Requires Python 3.9 and:
+    pip install torch torchvision matplotlib numpy scikit-learn
 """
 
 import os
@@ -37,14 +42,19 @@ np.random.seed(0)
 random.seed(0)
 
 def encode_image_to_spikes(image, T=100, max_rate=100):
-    """28×28 → 7×7 → (49, T) Poisson spike train."""
-    x = image.unsqueeze(0)
-    x = F.avg_pool2d(x, 2, 2)
-    x = F.avg_pool2d(x, 2, 2)
-    intensities = x.squeeze()
-    p = torch.clamp(intensities.flatten() * (max_rate/1000.0), 0, 1)
-    p = p.view(-1,1).expand(-1, T)
-    return (torch.rand(p.shape, device=image.device) < p).float()
+    """
+    Encode a 28×28 MNIST image into:
+      - spikes:     (49, T) Poisson spike tensor
+      - intensities: 7×7 average‑pooled map (unused here)
+    """
+    x = image.unsqueeze(0)                                  # (1,1,28,28)
+    x = F.avg_pool2d(x, kernel_size=2, stride=2)            # (1,1,14,14)
+    x = F.avg_pool2d(x, kernel_size=2, stride=2)            # (1,1,7,7)
+    intensities = x.squeeze()                               # (7,7)
+    p = torch.clamp(intensities.flatten() * (max_rate/1000), 0.0, 1.0)  # (49,)
+    p = p.view(-1,1).expand(-1, T)                          # (49, T)
+    spikes = (torch.rand(p.shape, device=image.device) < p).float()
+    return spikes, intensities
 
 class SpikingNetwork:
     def __init__(self,
@@ -113,16 +123,16 @@ class SpikingNetwork:
         return spikes_exc.float(), spikes_inh.float()
 
     def stdp_update(self, pre, post):
-        self.trace_pre  = self.trace_pre*self.alpha_trace + pre
-        self.trace_post = self.trace_post*self.alpha_trace + post
+        self.trace_pre  = self.trace_pre * self.alpha_trace + pre
+        self.trace_post = self.trace_post * self.alpha_trace + post
         # LTP
         for j in range(self.N_exc):
-            if post[j]>0:
+            if post[j] > 0:
                 dw = self.A_plus * self.trace_pre * (self.w_max - self.W_in2exc[:, j])
                 self.W_in2exc[:, j] += dw
         # LTD
         for i in range(self.N_in):
-            if pre[i]>0:
+            if pre[i] > 0:
                 dw = self.A_minus * self.trace_post * self.W_in2exc[i, :]
                 self.W_in2exc[i, :] -= dw
         torch.clamp_(self.W_in2exc, 0.0, self.w_max)
@@ -150,28 +160,27 @@ class SpikingNetwork:
             self.trace_pre.zero_(); self.trace_post.zero_()
             self.e_trace.zero_()
 
-            # simulate and train hidden & output
+            # simulate hidden + compute eligibility
+            total_spikes = torch.zeros(self.N_exc, device=device)
             for t in range(T):
                 pre = spike_train[:, t]
                 s_exc, _ = self.simulate_step(pre)
                 self.stdp_update(pre, s_exc)
                 out_current = self.W_exc2out.t() @ s_exc
-                out_spike = (out_current>=self.v_thr).float()
+                out_spike = (out_current >= self.v_thr).float()
                 self.update_eligibility(s_exc, out_spike)
+                total_spikes += s_exc
                 spikes_per_class[label] += s_exc
 
             # supervised R‑STDP update
-            total_spikes = spike_train.sum(dim=1)  # actually unused for R-STDP reward
-            votes = (spike_train.sum(dim=1).unsqueeze(1) * self.W_exc2out).sum(dim=0)
+            votes = (total_spikes.unsqueeze(1) * self.W_exc2out).sum(dim=0)
             pred = votes.argmax().item()
-            reward = 1.0 if pred==label else -1.0
+            reward = 1.0 if pred == label else -1.0
             self.apply_rstdp(reward)
 
-            # print every 10
             if (idx+1) % 10 == 0:
                 print(f"[Train] processed {idx+1}/{num_samples}")
 
-            # snapshot & interim eval
             if (idx+1) % log_interval == 0:
                 neuron_class = torch.argmax(spikes_per_class, dim=0)
                 acc = self.evaluate(test_ds, neuron_class,
@@ -182,9 +191,6 @@ class SpikingNetwork:
 
         weight_snaps.append(self.W_in2exc.cpu().flatten().numpy())
         neuron_class = torch.argmax(spikes_per_class, dim=0)
-
-        # (plots omitted for brevity)
-
         return neuron_class
 
     def evaluate(self, test_ds, neuron_class,
@@ -195,8 +201,8 @@ class SpikingNetwork:
             W_out[i, neuron_class[i]] = 1.0
 
         true_labels, pred_labels = [], []
-
         correct = 0
+
         for idx in range(num_samples):
             img, label = test_ds[idx]
             img = img.to(device)
@@ -209,24 +215,23 @@ class SpikingNetwork:
                 pre = spike_train[:, t]
                 s_exc, _ = self.simulate_step(pre)
                 total_spikes += s_exc
-                v_out = self.alpha_out*v_out + W_out.t() @ s_exc
+                v_out = self.alpha_out * v_out + W_out.t() @ s_exc
 
             votes = (total_spikes.unsqueeze(1) * self.W_exc2out).sum(dim=0)
             pred = votes.argmax().item()
-            true_labels.append(label); pred_labels.append(pred)
 
+            true_labels.append(label)
+            pred_labels.append(pred)
             if pred == label:
                 correct += 1
-            # print accuracy every 100 samples
+
             if (idx+1) % 100 == 0:
                 acc_so_far = correct / (idx+1) * 100.0
                 print(f"[Test] accuracy: {acc_so_far:.2f}%")
 
-        # final accuracy
         final_acc = correct / num_samples * 100.0
         print(f"[Test] final accuracy: {final_acc:.2f}%")
 
-        # confusion matrix plot...
         if record_outputs:
             cm = confusion_matrix(true_labels, pred_labels)
             disp = ConfusionMatrixDisplay(cm, display_labels=list(range(self.N_out)))
@@ -242,6 +247,7 @@ def main():
     parser.add_argument("--test-samples",  type=int, default=1000)
     parser.add_argument("--T",             type=int, default=100)
     parser.add_argument("--rate",          type=int, default=100)
+    parser.add_argument("--snapshot-interval", type=int, default=2000)
     args = parser.parse_args()
 
     transform = transforms.Compose([transforms.ToTensor()])
@@ -251,7 +257,8 @@ def main():
     snn = SpikingNetwork()
     neuron_class = snn.train(train_ds, test_ds,
                               num_samples=args.train_samples,
-                              T=args.T, max_rate=args.rate)
+                              T=args.T, max_rate=args.rate,
+                              log_interval=args.snapshot_interval)
     snn.evaluate(test_ds, neuron_class,
                  num_samples=args.test_samples,
                  T=args.T, max_rate=args.rate)
