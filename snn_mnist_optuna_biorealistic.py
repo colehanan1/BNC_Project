@@ -80,9 +80,13 @@ class BioSNN(nn.Module):
         beta1  = alpha1
         self.fc1  = nn.Linear(num_inputs, num_hidden)
         self.lif1 = snn.Synaptic(alpha=alpha1, beta=beta1, spike_grad=surrogate.fast_sigmoid())
-        # Recurrent output layer
-        self.fc_rec = nn.Linear(num_hidden + num_outputs, num_outputs)
-        # Output layer: heterogeneous time constants
+        # Output layer
+        self.fc2 = nn.Linear(num_hidden, num_outputs)
+        # Postsynaptic Synaptic LIF for output
+        taus2 = torch.linspace(tau_min, tau_max, num_outputs, device=device)
+        alpha2 = torch.exp(-1.0 / taus2)
+        beta2  = alpha2
+        self.lif2 = snn.Synaptic(alpha=alpha2, beta=beta2, spike_grad=surrogate.fast_sigmoid())
         taus2 = torch.linspace(tau_min, tau_max, num_outputs, device=device)
         alpha2 = torch.exp(-1.0 / taus2)
         beta2  = alpha2
