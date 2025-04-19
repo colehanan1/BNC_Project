@@ -129,7 +129,7 @@ def train(model, train_loader, loss_fn, optimizer, args):
               f"acc: {acc:.4f}, rate: {avg_rate:.4f}")
 
 # Evaluate accuracy
-def test(model, test_loader, args):
+def evaluate_model(model, test_loader, args):
     model.eval()
     correct = 0
     with torch.no_grad():
@@ -170,7 +170,7 @@ def main():
 
     # Train & Test
     train(model, train_loader, loss_fn, optimizer, args)
-    test(model, test_loader, args)
+    evaluate_model(model, test_loader, args)
 
 if __name__ == "__main__":
     main()
