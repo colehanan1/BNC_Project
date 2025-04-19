@@ -137,7 +137,7 @@ def objective(trial):
 # Main
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--trials",  type=int, default=10)
+    parser.add_argument("--trials",  type=int, default=1)
     parser.add_argument("--timeout", type=int, default=None)
     args = parser.parse_args()
 
@@ -203,7 +203,7 @@ if __name__ == "__main__":
     for imgs, lbls in fixed_loader:
         spikes = poisson_encode(imgs, T).to(device)
         spk1, _, _ = untrained(spikes, T)
-        counts_before += spk1.sum(axis=1).numpy()
+        counts_before += spk1.sum(axis=0).numpy()  # fix sum over time axis to match hidden-size
         idx += imgs.size(0)
         if idx>1000: break
     counts_before /= idx
@@ -214,7 +214,7 @@ if __name__ == "__main__":
         imgs, lbls = imgs.to(device), lbls.to(device)
         spikes     = poisson_encode(imgs, T).to(device)
         spk1, _, spk2 = model(spikes, T)
-        counts_after += spk1.sum(axis=1).cpu().numpy()
+        counts_after  += spk1.sum(axis=0).cpu().numpy()  # fix sum over time axis to match hidden-size
         out = spk2.sum(dim=0)
         y_true.extend(lbls.cpu().numpy())
         y_pred.extend(out.argmax(dim=1).cpu().numpy())
@@ -250,7 +250,7 @@ if __name__ == "__main__":
             plot_param_importances(study),
             plot_slice(study),
             plot_terminator_improvement(study)]
-    for f in figs: f.show()
+    for f in figs: f.imshow()
 
     # 4. Spike raster per digit
     spike_trains = {i:[] for i in range(10)}
@@ -293,4 +293,8 @@ if __name__ == "__main__":
                        "Accuracy":list(accs.values())+[overall]})
     print(df.to_markdown(index=False))
 
-    print(f"Final test accuracy: {correct/total:.4f}")
+    # Save the trained model's state_dict
+save_path = "snn_mnist_final.pth"
+torch.save(model.state_dict(), save_path)
+print(f"Model state_dict saved to {save_path}")
+print(f"Final test accuracy: {correct/total:.4f}")
