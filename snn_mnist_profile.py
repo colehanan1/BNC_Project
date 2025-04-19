@@ -23,7 +23,7 @@ import snntorch as snn
 from snntorch import spikegen as spkgen
 from snntorch import surrogate
 import optuna
-from optuna.pruners import HyperbandPruner
+from optuna.pruners import HyperbandPruner, SuccessiveHalvingPruner
 from optuna.exceptions import TrialPruned
 from optuna.visualization import plot_optimization_history
 
@@ -156,7 +156,7 @@ def objective(trial):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--trials",  type=int, default=100, help="Number of HPO trials")
+    parser.add_argument("--trials",  type=int, default=50, help="Number of HPO trials")
     parser.add_argument("--timeout", type=int, default=None, help="HPO timeout (s)")
     args = parser.parse_args()
 

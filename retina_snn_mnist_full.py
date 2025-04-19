@@ -47,7 +47,7 @@ def encode_image_to_spikes(img, T=250, rate=100):
 class SpikingNetwork:
     def __init__(self,
                  maps=8, kernel=5, stride=2,
-                 tau_m=20., tau_ref=2,
+                 tau_m=10., tau_ref=2,
                  A_plus=0.02, A_minus=0.01, w_max=0.5,
                  eta=0.01, alpha_e=0.95,
                  snapshot_every=1000):
