@@ -160,9 +160,13 @@ def main():
 
     # Create Optuna study with pruning
     study = optuna.create_study(
+        study_name="BNC_mnist_snn_tuning",
         direction="maximize",
-        pruner=SuccessiveHalvingPruner()
+        pruner=SuccessiveHalvingPruner(),
+        storage="sqlite:///mnist_snn_tuning.db",  # optional: persist to disk
+        load_if_exists=True  # resume if already created
     )
+
     study.optimize(objective, n_trials=args.trials, timeout=args.timeout)
 
     print("Best hyperparameters:", study.best_trial.params)
