@@ -91,8 +91,8 @@ class BioSNN(nn.Module):
     def forward(self, x, num_steps):
         B = x.size(1)
         # Initialize synaptic and membrane states
-        syn1, mem1 = self.lif1.init_synaptic(B, self.fc1.out_features)
-        syn2, mem2 = self.lif2.init_synaptic(B, self.fc_rec.out_features)
+        syn1, mem1 = self.lif1.init_synaptic()  # initialize synaptic & membrane state
+        syn2, mem2 = self.lif2.init_synaptic()  # initialize synaptic & membrane state
         rec_spk = torch.zeros(B, self.fc_rec.out_features, device=device)
 
         trace1      = []
