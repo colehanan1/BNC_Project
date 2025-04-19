@@ -104,7 +104,7 @@ class BioSNN(nn.Module):
             cur1       = self.fc1(x[t])
             spk1, syn1, mem1 = self.lif1(cur1, syn1, mem1)
             trace1.append(spk1[0].detach().cpu())
-            mem1_trace.append(mem1[0,0].item())
+            mem1_trace.append(mem1[0].item())  # mem1 is [B,features], index batch 0 then feature 0
             # Output layer with recurrence
             inp2       = torch.cat([spk1, rec_spk], dim=1)
             cur2       = self.fc_rec(inp2)

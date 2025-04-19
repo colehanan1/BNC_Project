@@ -34,6 +34,7 @@ from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
 import matplotlib.pyplot as plt
 import warnings
 from optuna.exceptions import ExperimentalWarning
+from optuna.visualization.matplotlib import plot_optimization_history, plot_param_importances
 # Suppress Optuna experimental warnings
 warnings.filterwarnings("ignore", category=ExperimentalWarning)
 import numpy as np
@@ -153,6 +154,11 @@ if __name__ == "__main__":
         load_if_exists=True
     )
     study.optimize(objective, n_trials=args.trials, timeout=args.timeout)
+
+    # Optuna plots
+    fig1 = plot_optimization_history(study)
+    fig2 = plot_param_importances(study)
+    fig1.show(); fig2.show()
 
     print("Best hyperparameters:", study.best_trial.params)
 
