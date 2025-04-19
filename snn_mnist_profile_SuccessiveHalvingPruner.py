@@ -32,6 +32,10 @@ from optuna.exceptions import TrialPruned
 
 from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
 import matplotlib.pyplot as plt
+import warnings
+from optuna.exceptions import ExperimentalWarning
+# Suppress Optuna experimental warnings
+warnings.filterwarnings("ignore", category=ExperimentalWarning)
 import numpy as np
 import pandas as pd
 
@@ -169,7 +173,7 @@ if __name__ == "__main__":
     # Training history
     epoch_accs = []
     weight_histories = []
-    for epoch in range(10):
+    for epoch in range(1):
         model.train()
         total_loss, correct = 0.0, 0
         for imgs, lbls in train_loader:
@@ -232,12 +236,12 @@ if __name__ == "__main__":
 
     # 2. Epoch vs Accuracy
     plt.figure()
-    plt.plot(range(1,11), epoch_accs, marker='o')
+    plt.plot(range(1, len(epoch_accs)+1), epoch_accs, marker='o')  # use dynamic length
     plt.xlabel("Epoch"); plt.ylabel("Accuracy")
     plt.title("Epoch vs Training Accuracy")
     plt.grid(True); plt.show()
 
-    # 3. Optuna plots
+                    # 3. Optuna plots
     from optuna.visualization.matplotlib import (
         plot_optimization_history,
         plot_parallel_coordinate,
@@ -245,29 +249,44 @@ if __name__ == "__main__":
         plot_slice,
         plot_terminator_improvement,
     )
-    figs = [plot_optimization_history(study),
-            plot_parallel_coordinate(study, ['tau','hidden','lr','T']),
-            plot_param_importances(study),
-            plot_slice(study),
-            plot_terminator_improvement(study)]
-    for f in figs: f.imshow()
+    # Define plotting functions
+    plot_funcs = [
+        plot_optimization_history,
+        lambda st: plot_parallel_coordinate(st, ['tau','hidden','lr','T']),
+        plot_param_importances,
+        plot_slice,
+        plot_terminator_improvement,
+    ]
+    # Generate and display each Optuna plot
+    for fn in plot_funcs:
+        ax = fn(study)
+        # Handle single Axes or array of Axes
+        if isinstance(ax, (list, tuple, np.ndarray)):
+            for subax in np.array(ax).ravel():
+                subax.figure.show()
+        else:
+            ax.figure.show()
 
-    # 4. Spike raster per digit
-    spike_trains = {i:[] for i in range(10)}
+        # 4. Spike raster per digit
+    spike_trains = {i: [] for i in range(10)}
     for imgs, lbls in test_loader:
-        spikes    = poisson_encode(imgs, T).to(device)
+        spikes = poisson_encode(imgs, T).to(device)
         spk1, _, _ = model(spikes, T)
-        for i, lbl in enumerate(lbls.cpu().numpy()):
-            if len(spike_trains[lbl])==0:
-                spike_trains[lbl] = spk1[:,i].cpu().numpy()
-        if all(spike_trains.values()): break
-    fig, axs = plt.subplots(5,2, figsize=(10,12), sharex=True)
-    for d,ax in enumerate(axs.flatten()):
-        ax.eventplot(np.where(spike_trains[d]==1)[0], orientation='horizontal')
+        for j, lbl in enumerate(lbls.cpu().numpy()):
+            if len(spike_trains[lbl]) == 0:
+                spike_trains[lbl] = spk1[:, j].cpu().numpy()
+        # Exit loop once we have spike trains for all 10 digits
+        if all(len(v) > 0 for v in spike_trains.values()):
+            break
+    # Plot rasters
+    fig, axs = plt.subplots(5, 2, figsize=(10, 12), sharex=True)
+    for d, ax in enumerate(axs.flatten()):
+        ax.eventplot(np.where(spike_trains[d] == 1)[0], orientation='horizontal')
         ax.set_title(f"Digit {d}")
-    plt.tight_layout(); plt.show()
+    plt.tight_layout()
+    plt.show()
 
-    # 5. Weight hist evolution
+    # 5. Weight hist evolution Weight hist evolution
     plt.figure(figsize=(8,6))
     for i,w in enumerate(weight_histories):
         hist,bins = np.histogram(w, bins=50, range=(-0.5,0.5), density=True)
@@ -293,8 +312,8 @@ if __name__ == "__main__":
                        "Accuracy":list(accs.values())+[overall]})
     print(df.to_markdown(index=False))
 
-    # Save the trained model's state_dict
-save_path = "snn_mnist_final.pth"
-torch.save(model.state_dict(), save_path)
-print(f"Model state_dict saved to {save_path}")
-print(f"Final test accuracy: {correct/total:.4f}")
+            # Save the trained model's state_dict
+    save_path = "snn_mnist_final.pth"
+    torch.save(model.state_dict(), save_path)
+    print(f"Model state_dict saved to {save_path}")
+    print(f"Final test accuracy: {correct/total:.4f}")
