@@ -90,7 +90,7 @@ class BioSNN(nn.Module):
 
     def forward(self, x, num_steps):
         B = x.size(1)
-        # Initialize synaptic & membrane states for both layers
+                # Initialize synaptic & membrane states for both layers
         syn1 = torch.zeros(B, self.fc1.out_features, device=device)
         mem1 = torch.zeros(B, self.fc1.out_features, device=device)
         syn2 = torch.zeros(B, self.fc2.out_features, device=device)
@@ -98,7 +98,7 @@ class BioSNN(nn.Module):
         # Traces
         trace1     = []
         mem1_trace = []
-        spk2_rec   = torch.zeros(num_steps, B, self.fc2.out_features, device=device)
+        spk2_list  = []  # collect output spikes over time
 
         for t in range(num_steps):
             # Hidden layer
@@ -109,8 +109,10 @@ class BioSNN(nn.Module):
             # Output layer
             cur2 = self.fc2(spk1)
             spk2, syn2, mem2 = self.lif2(cur2, syn2, mem2)
-            spk2_rec[t] = spk2
+            spk2_list.append(spk2)
 
+        # Stack output spike trains: [T, B, num_outputs]
+        spk2_rec = torch.stack(spk2_list, dim=0)
         return torch.stack(trace1), mem1_trace, spk2_rec
 
 # Optuna objective
