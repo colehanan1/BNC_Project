@@ -57,18 +57,27 @@ BAR_WIDTH = 5
 NUM_POS   = 28 - BAR_WIDTH + 1
 
 def sliding_bar_encode(imgs, num_steps):
+    """
+    Spatiotemporal sliding-bar Bernoulli encoder:
+    For each time step, mask a BAR_WIDTH vertical bar, pool to 7×7, normalize,
+    then sample Bernoulli spikes per feature.
+    Returns spikes of shape [num_steps, B, features].
+    """
     B = imgs.size(0)
-    rates = []
+    # Pool to 7×7 features
+    pool = nn.functional.avg_pool2d
+    spikes = torch.zeros(num_steps, B, (28//4)*(28//4), device=imgs.device)
     for t in range(num_steps):
         pos = t % NUM_POS
         mask = torch.zeros_like(imgs)
         mask[:, :, :, pos:pos+BAR_WIDTH] = 1.0
         patch = imgs * mask
-        inten = nn.functional.avg_pool2d(patch, 4).view(B, -1)
+        inten = pool(patch, 4).view(B, -1)
+        # normalize to [0,1]
         inten = inten / (inten.max(dim=1, keepdim=True)[0] + 1e-12)
-        rates.append(inten)
-    rates = torch.stack(rates)  # [T, B, features]
-    return spkgen.rate(rates, num_steps=num_steps)  # pass correct num_steps to avoid NoneType error
+        # Bernoulli sampling
+        spikes[t] = (torch.rand_like(inten) < inten).float()
+    return spikes
 
 # Bio-inspired SNN: FC→AdEx→FC→AdEx with recurrence & hetero taus
 class BioSNN(nn.Module):
