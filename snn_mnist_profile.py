@@ -66,7 +66,7 @@ class SNN(nn.Module):
             cur1       = self.fc1(x[t])
             spk1, mem1 = self.lif1(cur1, mem1)
             # Record hidden‑layer spikes and membrane for sample 0 only
-            spk1_trace.append(spk1[0].detach().cpu().numpy())
+            spk1_trace.append(spk1[0].detach().cpu())
             mem1_trace.append(mem1[0,0].item())  # <— fixed: extract scalar from mem1[0,0]
 
             cur2        = self.fc2(spk1)
@@ -80,7 +80,7 @@ def objective(trial):
     # Suggest hyperparameters
     tau    = trial.suggest_float("tau",    5.0, 20.0)
     hidden = trial.suggest_int("hidden",  20,  100)
-    lr      = trial.suggest_loguniform("lr", 1e-4, 1e-2)
+    lr = trial.suggest_float("lr", 1e-4, 1e-2, log=True)
     T       = trial.suggest_int("T",     50,   200)
 
     # Compute decay factors for LIF
@@ -128,8 +128,11 @@ def objective(trial):
         val_acc = correct / num_samples
         avg_rate = total_spikes / (num_samples * T)
         # Report intermediate results
-        trial.report(val_acc, epoch)
-        trial.report(avg_rate, epoch + 0.5)  # spike rate as a second metric
+        # report accuracy and spike rate at unique integer steps
+        step_acc = epoch * 2
+        step_rate = epoch * 2 + 1
+        trial.report(val_acc,    step_acc)
+        trial.report(avg_rate, step_rate)
 
         # Prune if no improvement or silent network
         if trial.should_prune():
