@@ -91,8 +91,12 @@ class BioSNN(nn.Module):
     def forward(self, x, num_steps):
         B = x.size(1)
         # Initialize synaptic and membrane states
-        syn1, mem1 = self.lif1.init_synaptic()  # initialize synaptic & membrane state
-        syn2, mem2 = self.lif2.init_synaptic()  # initialize synaptic & membrane state
+        # initialize synaptic & membrane state manually for batch
+        syn1 = torch.zeros(B, self.fc1.out_features, device=device)
+        mem1 = torch.zeros(B, self.fc1.out_features, device=device)  # initialize synaptic & membrane state
+        # initialize synaptic & membrane state for output layer manually
+        syn2 = torch.zeros(B, self.fc_rec.out_features, device=device)
+        mem2 = torch.zeros(B, self.fc_rec.out_features, device=device)  # initialize synaptic & membrane state
         rec_spk = torch.zeros(B, self.fc_rec.out_features, device=device)
 
         trace1      = []
@@ -104,7 +108,7 @@ class BioSNN(nn.Module):
             cur1       = self.fc1(x[t])
             spk1, syn1, mem1 = self.lif1(cur1, syn1, mem1)
             trace1.append(spk1[0].detach().cpu())
-            mem1_trace.append(mem1[0].item())  # mem1 is [B,features], index batch 0 then feature 0
+            mem1_trace.append(mem1[0, 0].item())  # record membrane of neuron 0 in batch 0  # mem1 is [B,features], index batch 0 then feature 0
             # Output layer with recurrence
             inp2       = torch.cat([spk1, rec_spk], dim=1)
             cur2       = self.fc_rec(inp2)
