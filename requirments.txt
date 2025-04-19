@@ -4,3 +4,5 @@ torchvision
 matplotlib
 seaborn
 scikit-learn
+snntorch
+optuna
