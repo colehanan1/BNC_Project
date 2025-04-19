@@ -80,13 +80,9 @@ class BioSNN(nn.Module):
         beta1  = alpha1
         self.fc1  = nn.Linear(num_inputs, num_hidden)
         self.lif1 = snn.Synaptic(alpha=alpha1, beta=beta1, spike_grad=surrogate.fast_sigmoid())
-        # Output layer
-        self.fc2 = nn.Linear(num_hidden, num_outputs)
+        # Output layer: feed-forward
+        self.fc2  = nn.Linear(num_hidden, num_outputs)
         # Postsynaptic Synaptic LIF for output
-        taus2 = torch.linspace(tau_min, tau_max, num_outputs, device=device)
-        alpha2 = torch.exp(-1.0 / taus2)
-        beta2  = alpha2
-        self.lif2 = snn.Synaptic(alpha=alpha2, beta=beta2, spike_grad=surrogate.fast_sigmoid())
         taus2 = torch.linspace(tau_min, tau_max, num_outputs, device=device)
         alpha2 = torch.exp(-1.0 / taus2)
         beta2  = alpha2
@@ -94,36 +90,28 @@ class BioSNN(nn.Module):
 
     def forward(self, x, num_steps):
         B = x.size(1)
-        # Initialize synaptic and membrane states
-        # initialize synaptic & membrane state manually for batch
+        # Initialize synaptic & membrane states for both layers
         syn1 = torch.zeros(B, self.fc1.out_features, device=device)
-        mem1 = torch.zeros(B, self.fc1.out_features, device=device)  # initialize synaptic & membrane state
-        # initialize synaptic & membrane state for output layer manually
-        syn2 = torch.zeros(B, self.fc_rec.out_features, device=device)
-        mem2 = torch.zeros(B, self.fc_rec.out_features, device=device)  # initialize synaptic & membrane state
-        rec_spk = torch.zeros(B, self.fc_rec.out_features, device=device)
-
-        trace1      = []
-        mem1_trace  = []
-        rec_trace2  = torch.zeros(num_steps, B, self.fc_rec.out_features, device=device)
+        mem1 = torch.zeros(B, self.fc1.out_features, device=device)
+        syn2 = torch.zeros(B, self.fc2.out_features, device=device)
+        mem2 = torch.zeros(B, self.fc2.out_features, device=device)
+        # Traces
+        trace1     = []
+        mem1_trace = []
+        spk2_rec   = torch.zeros(num_steps, B, self.fc2.out_features, device=device)
 
         for t in range(num_steps):
             # Hidden layer
-            cur1       = self.fc1(x[t])
+            cur1 = self.fc1(x[t])
             spk1, syn1, mem1 = self.lif1(cur1, syn1, mem1)
             trace1.append(spk1[0].detach().cpu())
-            mem1_trace.append(mem1[0].mean().item())  # record mean membrane potential for batch 0  # record membrane of neuron 0 in batch 0  # mem1 is [B,features], index batch 0 then feature 0
-            # Output layer with recurrence
-            # Ensure spk1 and rec_spk are 2D before concatenation
-            spk1_flat    = spk1.view(spk1.size(0), -1)
-            rec_spk_flat = rec_spk.view(rec_spk.size(0), -1)
-            inp2         = torch.cat([spk1_flat, rec_spk_flat], dim=1)
-            cur2         = self.fc_rec(inp2)
+            mem1_trace.append(mem1[0].mean().item())
+            # Output layer
+            cur2 = self.fc2(spk1)
             spk2, syn2, mem2 = self.lif2(cur2, syn2, mem2)
-            rec_spk      = spk2
-            rec_trace2[t] = spk2
+            spk2_rec[t] = spk2
 
-        return torch.stack(trace1), mem1_trace, rec_trace2
+        return torch.stack(trace1), mem1_trace, spk2_rec
 
 # Optuna objective
 def objective(trial):
