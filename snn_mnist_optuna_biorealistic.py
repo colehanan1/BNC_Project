@@ -110,10 +110,13 @@ class BioSNN(nn.Module):
             trace1.append(spk1[0].detach().cpu())
             mem1_trace.append(mem1[0].mean().item())  # record mean membrane potential for batch 0  # record membrane of neuron 0 in batch 0  # mem1 is [B,features], index batch 0 then feature 0
             # Output layer with recurrence
-            inp2       = torch.cat([spk1, rec_spk], dim=1)
-            cur2       = self.fc_rec(inp2)
+            # Ensure spk1 and rec_spk are 2D before concatenation
+            spk1_flat    = spk1.view(spk1.size(0), -1)
+            rec_spk_flat = rec_spk.view(rec_spk.size(0), -1)
+            inp2         = torch.cat([spk1_flat, rec_spk_flat], dim=1)
+            cur2         = self.fc_rec(inp2)
             spk2, syn2, mem2 = self.lif2(cur2, syn2, mem2)
-            rec_spk    = spk2
+            rec_spk      = spk2
             rec_trace2[t] = spk2
 
         return torch.stack(trace1), mem1_trace, rec_trace2
