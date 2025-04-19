@@ -52,17 +52,17 @@ class SNN(nn.Module):
         self.lif2 = snn.Leaky(beta=beta2, spike_grad=surrogate.fast_sigmoid())
 
     def forward(self, x, num_steps):
+        # x has shape [T, B, input_size]
         B = x.size(1)
         # Initialize states
-        mem1 = self.lif1.init_leaky(B, self.fc1.out_features)[0]
-        mem2 = self.lif2.init_leaky(B, self.fc2.out_features)[0]
-        # Traces for visualization
+        mem1 = self.lif1.init_leaky()  # returns [B, hidden_size]
+        mem2 = self.lif2.init_leaky()  # returns [B, output_size]        # Traces for visualization
         mem1_trace, spk1_trace = [], []
 
         spk2_rec = torch.zeros(num_steps, B, self.fc2.out_features, device=device)
         for t in range(num_steps):
             cur1    = self.fc1(x[t])
-            spk1, mem1 = self.lif1(cur1, mem1)
+            spk1, mem1 = self.lif1(cur1, mem1)  # works with mem1 from init_leaky()
             spk1_trace.append(spk1[:,0].detach().cpu().numpy())  # first sample
             mem1_trace.append(mem1[0].item())
 
