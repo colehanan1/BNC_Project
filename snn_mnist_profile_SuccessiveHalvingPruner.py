@@ -23,10 +23,8 @@ import snntorch as snn
 from snntorch import spikegen as spkgen
 from snntorch import surrogate
 import optuna
-from optuna.pruners import HyperbandPruner, SuccessiveHalvingPruner
+from optuna.pruners import SuccessiveHalvingPruner
 from optuna.exceptions import TrialPruned
-from optuna.visualization import plot_optimization_history
-
 
 # Device selection (MPS → CUDA → CPU)
 def get_device():
@@ -156,7 +154,7 @@ def objective(trial):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--trials",  type=int, default=50, help="Number of HPO trials")
+    parser.add_argument("--trials",  type=int, default=20, help="Number of HPO trials")
     parser.add_argument("--timeout", type=int, default=None, help="HPO timeout (s)")
     args = parser.parse_args()
 
@@ -164,18 +162,12 @@ def main():
     study = optuna.create_study(
         study_name="BNC_mnist_snn_tuning",
         direction="maximize",
-        pruner=HyperbandPruner(
-            min_resource=10,
-            max_resource=100,  # e.g., 100 steps total
-            reduction_factor=3
-    ),
-        storage="sqlite:///mnist_snn_tuning_hyperbrand.db",  # optional: persist to disk
+        pruner=SuccessiveHalvingPruner(),
+        storage="sqlite:///mnist_snn_tuning.db",  # optional: persist to disk
         load_if_exists=True  # resume if already created
     )
 
     study.optimize(objective, n_trials=args.trials, timeout=args.timeout)
-    fig = plot_optimization_history(study)
-    fig.show()
 
     print("Best hyperparameters:", study.best_trial.params)
 
