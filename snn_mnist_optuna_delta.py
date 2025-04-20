@@ -101,10 +101,10 @@ warnings.filterwarnings("ignore", category=ExperimentalWarning)
 def objective(trial):
     # Hyperparams
     tau    = trial.suggest_float("tau", 3.0, 30.0)
-    hidden = trial.suggest_int("hidden", 15, 300)
+    hidden = trial.suggest_int("hidden", 15, 500)
     lr     = trial.suggest_float("lr", 1e-4, 1e-2, log=True)
-    T      = trial.suggest_int("T", 75, 300)
-    alpha  = trial.suggest_float("alpha_mem", 1e-3, 1e-1, log=True)
+    T      = trial.suggest_int("T", 75, 500)
+    alpha  = trial.suggest_float("alpha_mem", 1e-4, 1e-1, log=True)
 
     # Decay factors
     beta_val = math.exp(-1.0 / tau)
@@ -176,7 +176,7 @@ def objective(trial):
 # ───────────────────────────── Main ─────────────────────────────────
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--trials",  type=int, default=500)
+    parser.add_argument("--trials",  type=int, default=10)
     parser.add_argument("--timeout", type=int, default=None)
     args = parser.parse_args()
 
@@ -251,7 +251,7 @@ if __name__ == "__main__":
     # Plot smoothed waveforms
     plt.figure(figsize=(8,5))
     for c, trace in mem_smooth.items():
-        plt.plot(trace.numpy(), label=f"Class {c}")
+        plt.plot(trace.detach().cpu().numpy(), label=f"Class {c}")
     plt.title("Smoothed Membrane Potential Traces")
     plt.xlabel("Time step"); plt.ylabel("Membrane potential")
     plt.legend(); plt.show()
