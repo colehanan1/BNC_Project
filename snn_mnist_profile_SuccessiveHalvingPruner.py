@@ -142,7 +142,7 @@ def objective(trial):
 # Main
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--trials",  type=int, default=10)
+    parser.add_argument("--trials",  type=int, default=1)
     parser.add_argument("--timeout", type=int, default=None)
     args = parser.parse_args()
 
@@ -154,11 +154,6 @@ if __name__ == "__main__":
         load_if_exists=True
     )
     study.optimize(objective, n_trials=args.trials, timeout=args.timeout)
-
-    # Optuna plots
-    fig1 = plot_optimization_history(study)
-    fig2 = plot_param_importances(study)
-    fig1.show(); fig2.show()
 
     print("Best hyperparameters:", study.best_trial.params)
 
