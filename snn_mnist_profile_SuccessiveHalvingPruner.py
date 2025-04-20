@@ -142,7 +142,7 @@ def objective(trial):
 # Main
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--trials",  type=int, default=1)
+    parser.add_argument("--trials",  type=int, default=10)
     parser.add_argument("--timeout", type=int, default=None)
     args = parser.parse_args()
 
@@ -179,7 +179,7 @@ if __name__ == "__main__":
     # Training history
     epoch_accs = []
     weight_histories = []
-    for epoch in range(1):
+    for epoch in range(10):
         model.train()
         total_loss, correct = 0.0, 0
         for imgs, lbls in train_loader:

@@ -183,7 +183,7 @@ if __name__ == "__main__":
     test_loader  = torch.utils.data.DataLoader(ds_test,  batch_size=64, shuffle=False)
 
     epoch_accs, weight_histories = [], []
-    for epoch in range(20):
+    for epoch in range(10):
         model.train()
         total_loss, correct = 0.0, 0
         for imgs, lbls in train_loader:
@@ -217,7 +217,7 @@ if __name__ == "__main__":
     for imgs, lbls in fixed_loader:
         spikes = delta_encode(imgs, T).to(device)
         spk1, _, _ = untrained(spikes, T)
-        counts_before += spk1.sum(axis=0).cpu().numpy()
+        counts_before += spk1.sum(dim=(0, 1)).cpu().numpy()
         idx += imgs.size(0)
         if idx>1000: break
     counts_before /= idx
@@ -228,7 +228,7 @@ if __name__ == "__main__":
         imgs, lbls = imgs.to(device), lbls.to(device)
         spikes     = delta_encode(imgs, T).to(device)
         spk1, _, spk2 = model(spikes, T)
-        counts_after  += spk1.sum(axis=0).cpu().numpy()  # fix sum over time axis to match hidden-size
+        counts_after += spk1.sum(dim=(0, 1)).cpu().numpy()
         out = spk2.sum(dim=0)
         y_true.extend(lbls.cpu().numpy())
         y_pred.extend(out.argmax(dim=1).cpu().numpy())
