@@ -126,11 +126,11 @@ class BioSNN(nn.Module):
 
 # Optuna objective
 def objective(trial):
-    tau_min = trial.suggest_float("tau_min", 5.0, 10.0)
-    tau_max = trial.suggest_float("tau_max", 10.0, 30.0)
-    hidden  = trial.suggest_int("hidden", 20, 100)
+    tau_min = trial.suggest_float("tau_min", 2.0, 10.0)
+    tau_max = trial.suggest_float("tau_max", 7.5, 40.0)
+    hidden  = trial.suggest_int("hidden", 20, 1000)
     lr      = trial.suggest_float("lr", 1e-4, 1e-2, log=True)
-    T       = trial.suggest_int("T", 50, 200)
+    T       = trial.suggest_int("T", 50, 1000)
 
     model = BioSNN(49, hidden, 10, tau_min, tau_max).to(device)
     opt   = optim.Adam(model.parameters(), lr=lr)
@@ -174,7 +174,7 @@ def objective(trial):
 # Main & plotting
 if __name__ == '__main__':
     p = argparse.ArgumentParser()
-    p.add_argument('--trials', type=int, default=20)
+    p.add_argument('--trials', type=int, default=1)
     p.add_argument('--timeout',type=int, default=None)
     args = p.parse_args()
 
@@ -199,7 +199,8 @@ if __name__ == '__main__':
     # Training loop with history
     epoch_accs = []
     weight_histories = []
-    for e in range(10):
+    num_epochs = 1000
+    for e in range(num_epochs):
         tot_loss, corr = 0.0, 0
         for imgs,labels in train_loader:
             imgs,labels=imgs.to(device),labels.to(device)
