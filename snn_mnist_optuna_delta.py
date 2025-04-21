@@ -176,7 +176,7 @@ def objective(trial):
 # ───────────────────────────── Main ─────────────────────────────────
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--trials",  type=int, default=10)
+    parser.add_argument("--trials",  type=int, default=20)
     parser.add_argument("--timeout", type=int, default=None)
     args = parser.parse_args()
 
@@ -206,6 +206,8 @@ if __name__ == "__main__":
     test_loader  = torch.utils.data.DataLoader(ds_test,  batch_size=64, shuffle=False)
 
     # Retrain full
+    epoch_accs = []
+    weight_histories = []
     for epoch in range(10):
         model.train()
         tot_loss, corr = 0.0, 0
@@ -221,6 +223,8 @@ if __name__ == "__main__":
             loss.backward(); optimizer.step()
             tot_loss += loss.item(); corr += (out.argmax(dim=1)==lbls).sum().item()
         acc = corr / len(train_loader.dataset)
+        epoch_accs.append(acc)
+        weight_histories.append(model.fc1.weight.detach().cpu().numpy().ravel())
         print(f"Epoch {epoch+1} — loss: {tot_loss/len(train_loader):.4f}, acc: {acc:.4f}")
 
     # Evaluate & record waveforms
@@ -256,8 +260,144 @@ if __name__ == "__main__":
     plt.xlabel("Time step"); plt.ylabel("Membrane potential")
     plt.legend(); plt.show()
 
-    # original visualisations (confusion, rasters, weights, etc.)
-    # … copy unchanged from previous script …
+    # 1. Compute before‑learning counts
+    untrained = SNN(49, hidden, 10, beta, beta).to(device)
+    counts_before = np.zeros(hidden, dtype=float)
+    fixed_loader = torch.utils.data.DataLoader(ds_test, batch_size=64, shuffle=False)
+
+    idx = 0
+    for imgs, lbls in fixed_loader:
+        spikes = delta_encode(imgs, T).to(device)
+        spk1, _, _ = untrained(spikes, T)
+        # sum over time axis (axis=1) to get shape [batch, hidden], then sum batch
+        counts_before += spk1.sum(dim=2).sum(dim=0).detach().cpu().numpy()
+        idx += imgs.size(0)
+        if idx >= 1000:
+            break
+    counts_before /= idx
+
+    # 2. Compute after‑learning counts & gather preds
+    counts_after = np.zeros(hidden, dtype=float)
+
+    y_true, y_pred = [], []
+    idx = 0
+    for imgs, lbls in fixed_loader:
+        imgs, lbls = imgs.to(device), lbls.to(device)
+        spikes = delta_encode(imgs, T).to(device)
+        spk1, _, spk2 = model(spikes, T)
+        counts_after += spk1.sum(dim=2).sum(dim=0).detach().cpu().numpy()
+        out = spk2.sum(dim=1)  # sum spikes over time for output layer
+        y_true.extend(lbls.cpu().numpy())
+        y_pred.extend(out.argmax(dim=1).cpu().numpy())
+        idx += imgs.size(0)
+        if idx >= 1000:
+            break
+    counts_after /= idx
+
+    # 3. Confusion Matrix (force 10×10)
+    labels = list(range(10))
+    cm = confusion_matrix(y_true, y_pred, labels=labels)
+    disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=labels)
+    fig, ax = plt.subplots(figsize=(6, 6))
+    disp.plot(ax=ax, cmap=plt.cm.Blues, colorbar=True)
+    # fix ticks to match labels
+    ax.set_xticks(np.arange(len(labels)))
+    ax.set_yticks(np.arange(len(labels)))
+    ax.set_title("Confusion Matrix")
+    plt.show()
+
+    # 4. Epoch vs. Accuracy
+    plt.figure()
+    plt.plot(np.arange(1, len(epoch_accs) + 1), epoch_accs, marker='o')
+    plt.xlabel("Epoch")
+    plt.ylabel("Accuracy")
+    plt.title("Epoch vs Training Accuracy")
+    plt.grid(True)
+    plt.show()
+
+    # 5. Optuna plots
+    from optuna.visualization.matplotlib import (
+        plot_optimization_history,
+        plot_parallel_coordinate,
+        plot_param_importances,
+        plot_slice,
+        plot_terminator_improvement,
+    )
+
+    plot_funcs = [
+        plot_optimization_history,
+        lambda st: plot_parallel_coordinate(st, ['tau', 'hidden', 'lr', 'T']),
+        plot_param_importances,
+        plot_slice,
+        plot_terminator_improvement,
+    ]
+    for fn in plot_funcs:
+        ax = fn(study)
+        # show each subplot
+        if isinstance(ax, (list, tuple, np.ndarray)):
+            for subax in np.array(ax).ravel():
+                subax.figure.show()
+        else:
+            ax.figure.show()
+
+    # 6. Spike raster per digit
+    spike_trains = {i: None for i in range(10)}
+    for imgs, lbls in test_loader:
+        spikes = delta_encode(imgs, T).to(device)
+        spk1, _, _ = model(spikes, T)
+        for j, lbl in enumerate(lbls.cpu().numpy()):
+            if spike_trains[lbl] is None:
+                # take the time series of neuron j
+                spike_trains[lbl] = spk1[j].detach().cpu().numpy()
+        if all(v is not None for v in spike_trains.values()):
+            break
+
+    fig, axs = plt.subplots(5, 2, figsize=(10, 12), sharex=True)
+    for d, ax in enumerate(axs.flatten()):
+        times = np.where(spike_trains[d] == 1)[0]
+        ax.eventplot(times, orientation='horizontal')
+        ax.set_title(f"Digit {d}")
+    plt.tight_layout()
+    plt.show()
+
+    # 7. Weight‑hist evolution
+    plt.figure(figsize=(8, 6))
+    for i, w in enumerate(weight_histories):
+        hist, bins = np.histogram(w, bins=50, range=(-0.5, 0.5), density=True)
+        plt.plot(bins[:-1], hist, label=f"Ep {i + 1}")
+    plt.legend()
+    plt.title("FC1 Weight Distribution")
+    plt.show()
+
+    # 8. Spike activity before vs. after
+    neurons = np.arange(hidden)
+    width = 0.4
+    plt.figure(figsize=(10, 4))
+    plt.bar(neurons - width / 2, counts_before, width, label='Before')
+    plt.bar(neurons + width / 2, counts_after, width, label='After')
+    plt.xlabel("Hidden Neuron Index")
+    plt.ylabel("Avg. Spike Count")
+    plt.legend()
+    plt.title("Spike Activity Before vs After")
+    plt.show()
+
+    # 9. Accuracy table per digit
+    accs = {}
+    for d in labels:
+        idxs = [i for i, y in enumerate(y_true) if y == d]
+        accs[d] = np.mean([y_pred[i] == y_true[i] for i in idxs]) if idxs else 0.0
+    overall = np.mean([y_pred[i] == y_true[i] for i in range(len(y_true))])
+    df = pd.DataFrame({
+        "Digit": labels + ['Overall'],
+        "Accuracy": [accs[d] for d in labels] + [overall]
+    })
+    print(df.to_markdown(index=False))
+
+    # 10. Save model state_dict
+    save_path = "snn_mnist_final.pth"
+    torch.save(model.state_dict(), save_path)
+    print(f"Model state_dict saved to {save_path}")
+    print(f"Final test accuracy: {overall:.4f}")
 
     # Save final model
     torch.save(model.state_dict(), "snn_mnist_final.pth")
