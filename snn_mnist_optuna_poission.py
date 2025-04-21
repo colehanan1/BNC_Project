@@ -282,15 +282,14 @@ if __name__ == "__main__":
 
     # plot AP‑shaped waveforms
     nrows, ncols = 2, 5
-    fig, axes = plt.subplots(nrows, ncols, figsize=(15, 6), sharex=True, sharey=True)
-
+    fig, axes = plt.subplots(10, 1, figsize=(6, 20), sharex=True, sharey=True)
     for c, trace in ap_traces.items():
         row = c // ncols
         col = c % ncols
         ax = axes[row, col]
         ax.plot(trace)
         ax.set_title(f"Class {c}")
-        ax.set_ylim(0, 2)  # fixed y‑max
+        ax.set_ylim(0, 1.2)  # fixed y‑max
         ax.set_xlabel("Time step")
         ax.set_ylabel("Filtered spike")
         ax.grid(True)
@@ -441,7 +440,3 @@ if __name__ == "__main__":
     torch.save(model.state_dict(), save_path)
     print(f"Model state_dict saved to {save_path}")
     print(f"Final test accuracy: {overall:.4f}")
-
-    # Save final model
-    torch.save(model.state_dict(), "snn_mnist_final_poission.pth")
-    print("Model state_dict saved to snn_mnist_final_poission.pth")
