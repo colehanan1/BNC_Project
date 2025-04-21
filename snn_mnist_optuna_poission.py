@@ -217,7 +217,7 @@ if __name__ == "__main__":
     # Retrain full
     epoch_accs = []
     weight_histories = []
-    for epoch in range(1):
+    for epoch in range(10):
         model.train()
         tot_loss, corr = 0.0, 0
         for imgs, lbls in train_loader:
@@ -281,13 +281,26 @@ if __name__ == "__main__":
         ap_traces[c] = ap.view(-1).detach().cpu().numpy()
 
     # plot AP‑shaped waveforms
-    plt.figure(figsize=(8, 5))
+    nrows, ncols = 2, 5
+    fig, axes = plt.subplots(nrows, ncols, figsize=(15, 6), sharex=True, sharey=True)
+
     for c, trace in ap_traces.items():
-        plt.plot(trace, label=f"Class {c}")
-    plt.title("α‑Kernel Filtered Spike Waveforms")
-    plt.xlabel("Time step");
-    plt.ylabel("Filtered spike")
-    plt.legend();
+        row = c // ncols
+        col = c % ncols
+        ax = axes[row, col]
+        ax.plot(trace)
+        ax.set_title(f"Class {c}")
+        ax.set_ylim(0, 2)  # fixed y‑max
+        ax.set_xlabel("Time step")
+        ax.set_ylabel("Filtered spike")
+        ax.grid(True)
+
+    # Turn off any unused axes (if you ever change grid size)
+    for idx in range(len(ap_traces), nrows * ncols):
+        fig.delaxes(axes.flatten()[idx])
+
+    fig.suptitle("α‑Kernel Filtered Spike Waveforms", fontsize=16, y=1.02)
+    plt.tight_layout()
     plt.show()
 
     # 1. Compute before‑learning counts
