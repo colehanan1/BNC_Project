@@ -49,19 +49,23 @@ print(f"Using device: {device}")
 # ───────────────────── Delta‑modulation encoder ─────────────────────
 pool7 = nn.AvgPool2d(4)  # 28x28 -> 7x7
 
-def delta_encode(img, T, threshold=0.1, off_spike=True):
-    inten = pool7(img).view(img.size(0), -1)           # [B,49]
-    inten_seq = inten.unsqueeze(0).repeat(T,1,1)       # [T,B,49]
-    return spkgen.delta(inten_seq, threshold=threshold, off_spike=off_spike)
+def poisson_encode(img, num_steps):
+    inten = pool7(img).view(img.size(0), -1)
+    inten = inten / (inten.max(dim=1, keepdim=True)[0] + 1e-12)
+    return spkgen.rate(inten, num_steps=num_steps)
 
-# ────────────────────────── SNN definition ──────────────────────────
+    # ────────────────────────── SNN definition ──────────────────────────
 class SNN(nn.Module):
     def __init__(self, num_inputs, num_hidden, num_outputs, beta1, beta2):
         super().__init__()
         self.fc1  = nn.Linear(num_inputs, num_hidden)
-        self.lif1 = snn.Leaky(beta=beta1, spike_grad=surrogate.fast_sigmoid())
+        self.lif1 = snn.Leaky(
+            beta=beta1,
+            spike_grad=surrogate.fast_sigmoid())
         self.fc2  = nn.Linear(num_hidden, num_outputs)
-        self.lif2 = snn.Leaky(beta=beta2, spike_grad=surrogate.fast_sigmoid())
+        self.lif2 = snn.Leaky(beta=beta2,
+                              spike_grad=surrogate.fast_sigmoid())
+        self.bias1 = nn.Parameter(torch.tensor(0.2))
 
     def forward(self, x, T):
         batch_size = x.size(1)
@@ -73,7 +77,8 @@ class SNN(nn.Module):
         mem2_rec = torch.zeros(T, batch_size, self.fc2.out_features, device=device)
 
         for t in range(T):
-            cur1 = self.fc1(x[t])
+            # add bias to keep membrane charging each step
+            cur1 = self.fc1(x[t]) + 0.2  # ← tweak 0.2 up/down
             spk1, mem1 = self.lif1(cur1, mem1)
             spk1_trace.append(spk1.detach())
             mem1_trace.append(mem1[0,0].item())
@@ -129,7 +134,7 @@ def objective(trial):
         total_spikes, correct, samples = 0.0, 0, 0
         for batch_idx, (imgs, lbls) in enumerate(loader_tr):
             imgs, lbls = imgs.to(device), lbls.to(device)
-            spikes = delta_encode(imgs, T).to(device)
+            spikes = poisson_encode(imgs, T).to(device)
             optimizer.zero_grad()
             spk1, mem1_tr, spk2_rec, mem2_rec = model(spikes, T)
             out = spk2_rec.sum(dim=0)
@@ -165,7 +170,7 @@ def objective(trial):
     with torch.no_grad():
         for imgs, lbls in loader_val:
             imgs, lbls = imgs.to(device), lbls.to(device)
-            spikes     = delta_encode(imgs, T).to(device)
+            spikes     = poisson_encode(imgs, T).to(device)
             spk1, mem1_tr, spk2_rec, mem2_rec = model(spikes, T)
             out = spk2_rec.sum(dim=0)
             correct += (out.argmax(dim=1)==lbls).sum().item()
@@ -175,15 +180,15 @@ def objective(trial):
 # ───────────────────────────── Main ─────────────────────────────────
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--trials",  type=int, default=5)
+    parser.add_argument("--trials",  type=int, default=100)
     parser.add_argument("--timeout", type=int, default=None)
     args = parser.parse_args()
 
     study = optuna.create_study(
-        study_name="BNC_mnist_snn_tuning_delta_wave",
+        study_name="BNC_mnist_snn_tuning_poission_wave",
         direction="maximize",
         pruner=SuccessiveHalvingPruner(),
-        storage="sqlite:///mnist_snn_tuning_delta_wave.db",
+        storage="sqlite:///mnist_snn_tuning_poission_wave.db",
         load_if_exists=True
     )
     study.optimize(objective, n_trials=args.trials, timeout=args.timeout)
@@ -212,7 +217,7 @@ if __name__ == "__main__":
         tot_loss, corr = 0.0, 0
         for imgs, lbls in train_loader:
             imgs, lbls = imgs.to(device), lbls.to(device)
-            spikes = delta_encode(imgs, T).to(device)
+            spikes = poisson_encode(imgs, T).to(device)
             optimizer.zero_grad()
             spk1, mem1_tr, spk2_rec, mem2_rec = model(spikes, T)
             out = spk2_rec.sum(dim=0)
@@ -232,7 +237,7 @@ if __name__ == "__main__":
     mem_traces = {c: None for c in range(10)}
     for imgs, lbls in test_loader:
         imgs, lbls = imgs.to(device), lbls.to(device)
-        spikes = delta_encode(imgs, T).to(device)
+        spikes = poisson_encode(imgs, T).to(device)
         spk1, mem1_tr, spk2_rec, mem2_rec = model(spikes, T)
         for i,c in enumerate(lbls.cpu().numpy()):
             if mem_traces[c] is None:
@@ -266,7 +271,7 @@ if __name__ == "__main__":
 
     idx = 0
     for imgs, lbls in fixed_loader:
-        spikes = delta_encode(imgs, T).to(device)
+        spikes = poisson_encode(imgs, T).to(device)
         spk1, mem1_tr, spk2_rec, mem2_rec = untrained(spikes, T)
         # sum over time axis (axis=1) to get shape [batch, hidden], then sum batch
         counts_before += spk1.sum(dim=0).sum(dim=0).detach().cpu().numpy()
@@ -282,7 +287,7 @@ if __name__ == "__main__":
     idx = 0
     for imgs, lbls in fixed_loader:
         imgs, lbls = imgs.to(device), lbls.to(device)
-        spikes = delta_encode(imgs, T).to(device)
+        spikes = poisson_encode(imgs, T).to(device)
         spk1, mem1_tr, spk2_rec, mem2_rec = model(spikes, T)
         counts_after += spk1.sum(dim=0).sum(dim=0).detach().cpu().numpy()
         out = spk2_rec.sum(dim=0)  # sum spikes over time for output layer
@@ -342,7 +347,7 @@ if __name__ == "__main__":
     # 6. Spike raster per digit
     spike_trains = {i: None for i in range(10)}
     for imgs, lbls in test_loader:
-        spikes = delta_encode(imgs, T).to(device)
+        spikes = poisson_encode(imgs, T).to(device)
         spk1, mem1_tr, spk2_rec, mem2_rec = model(spikes, T)
         for j, lbl in enumerate(lbls.cpu().numpy()):
             if spike_trains[lbl] is None:
@@ -393,11 +398,11 @@ if __name__ == "__main__":
     print(df.to_markdown(index=False))
 
     # 10. Save model state_dict
-    save_path = "snn_mnist_final.pth"
+    save_path = "snn_mnist_final_poission.pth"
     torch.save(model.state_dict(), save_path)
     print(f"Model state_dict saved to {save_path}")
     print(f"Final test accuracy: {overall:.4f}")
 
     # Save final model
-    torch.save(model.state_dict(), "snn_mnist_final.pth")
-    print("Model state_dict saved to snn_mnist_final.pth")
+    torch.save(model.state_dict(), "snn_mnist_final_poission.pth")
+    print("Model state_dict saved to snn_mnist_final_poission.pth")
