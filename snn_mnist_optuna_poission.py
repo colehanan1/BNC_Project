@@ -217,7 +217,7 @@ if __name__ == "__main__":
     # Retrain full
     epoch_accs = []
     weight_histories = []
-    for epoch in range(2):
+    for epoch in range(1):
         model.train()
         tot_loss, corr = 0.0, 0
         for imgs, lbls in train_loader:
@@ -278,7 +278,7 @@ if __name__ == "__main__":
     for c, spk in spk_traces.items():
         spk = spk.view(1, 1, -1).to(device)   # move to MPS (or CUDA) same as kernel
         ap = F.conv1d(spk, kernel, padding=kernel.size(-1) // 2)
-        ap_traces[c] = ap.view(-1).cpu().numpy()
+        ap_traces[c] = ap.view(-1).detach().cpu().numpy()
 
     # plot AP‑shaped waveforms
     plt.figure(figsize=(8, 5))
