@@ -30,6 +30,7 @@ from optuna.exceptions import TrialPruned, ExperimentalWarning
 from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
 import matplotlib.pyplot as plt
 import numpy as np, pandas as pd
+import torch.nn.functional as F
 import warnings
 warnings.filterwarnings(
     "ignore",
@@ -53,6 +54,10 @@ def poisson_encode(img, num_steps):
     inten = pool7(img).view(img.size(0), -1)
     inten = inten / (inten.max(dim=1, keepdim=True)[0] + 1e-12)
     return spkgen.rate(inten, num_steps=num_steps)
+
+def alpha_kernel(L=100, tau_r=1.0, tau_f=5.0, dt=1.0, device='cpu'):
+    t = torch.arange(0, L * dt, dt, device=device)
+    return (t / tau_r) * torch.exp(1 - t / tau_r) * torch.exp(-t / tau_f)
 
     # ────────────────────────── SNN definition ──────────────────────────
 class SNN(nn.Module):
@@ -180,7 +185,7 @@ def objective(trial):
 # ───────────────────────────── Main ─────────────────────────────────
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--trials",  type=int, default=100)
+    parser.add_argument("--trials",  type=int, default=1)
     parser.add_argument("--timeout", type=int, default=None)
     args = parser.parse_args()
 
@@ -212,7 +217,7 @@ if __name__ == "__main__":
     # Retrain full
     epoch_accs = []
     weight_histories = []
-    for epoch in range(10):
+    for epoch in range(2):
         model.train()
         tot_loss, corr = 0.0, 0
         for imgs, lbls in train_loader:
@@ -235,13 +240,15 @@ if __name__ == "__main__":
     model.eval()
     # collect one example per class
     mem_traces = {c: None for c in range(10)}
+    spk_traces = {c: None for c in range(10)}
     for imgs, lbls in test_loader:
         imgs, lbls = imgs.to(device), lbls.to(device)
         spikes = poisson_encode(imgs, T).to(device)
         spk1, mem1_tr, spk2_rec, mem2_rec = model(spikes, T)
-        for i,c in enumerate(lbls.cpu().numpy()):
+        for i, c in enumerate(lbls.cpu().numpy()):
             if mem_traces[c] is None:
-                mem_traces[c] = mem2_rec[:,i,c].cpu()
+                mem_traces[c] = mem2_rec[:, i, c].cpu()
+                spk_traces[c] = spk2_rec[:, i, c].cpu().float()
         if all(v is not None for v in mem_traces.values()): break
 
     # Post‑processing: exponential smoothing
@@ -263,6 +270,25 @@ if __name__ == "__main__":
     plt.title("Smoothed Membrane Potential Traces")
     plt.xlabel("Time step"); plt.ylabel("Membrane potential")
     plt.legend(); plt.show()
+
+    # ─── α‑kernel convolution to get AP‑shaped spikes ───
+    kernel = alpha_kernel(L=50, tau_r=1.0, tau_f=5.0,
+                          dt=1.0, device=device).view(1, 1, -1)
+    ap_traces = {}
+    for c, spk in spk_traces.items():
+        spk = spk.view(1, 1, -1).to(device)   # move to MPS (or CUDA) same as kernel
+        ap = F.conv1d(spk, kernel, padding=kernel.size(-1) // 2)
+        ap_traces[c] = ap.view(-1).cpu().numpy()
+
+    # plot AP‑shaped waveforms
+    plt.figure(figsize=(8, 5))
+    for c, trace in ap_traces.items():
+        plt.plot(trace, label=f"Class {c}")
+    plt.title("α‑Kernel Filtered Spike Waveforms")
+    plt.xlabel("Time step");
+    plt.ylabel("Filtered spike")
+    plt.legend();
+    plt.show()
 
     # 1. Compute before‑learning counts
     untrained = SNN(49, hidden, 10, beta, beta).to(device)
