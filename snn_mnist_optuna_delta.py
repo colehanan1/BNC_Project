@@ -37,7 +37,6 @@ warnings.filterwarnings(
     module="optuna.trial._trial"
 )
 
-
 # ───────────────────────── Device selection ─────────────────────────
 def get_device():
     if torch.backends.mps.is_available(): return torch.device("mps")
@@ -208,7 +207,7 @@ if __name__ == "__main__":
     # Retrain full
     epoch_accs = []
     weight_histories = []
-    for epoch in range(1):
+    for epoch in range(30):
         model.train()
         tot_loss, corr = 0.0, 0
         for imgs, lbls in train_loader:

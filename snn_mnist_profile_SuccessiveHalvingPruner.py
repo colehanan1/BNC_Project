@@ -142,7 +142,7 @@ def objective(trial):
 # Main
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--trials",  type=int, default=1)
+    parser.add_argument("--trials",  type=int, default=100)
     parser.add_argument("--timeout", type=int, default=None)
     args = parser.parse_args()
 
