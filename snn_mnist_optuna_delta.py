@@ -132,12 +132,12 @@ def objective(trial):
             imgs, lbls = imgs.to(device), lbls.to(device)
             spikes = delta_encode(imgs, T).to(device)
             optimizer.zero_grad()
-            spk1, _, spk2, mem2 = model(spikes, T)
-            out = spk2.sum(dim=0)
+            spk1, mem1_tr, spk2_rec, mem2_rec = model(spikes, T)
+            out = spk2_rec.sum(dim=0)
             ce_loss = loss_fn(out, lbls)
             # membrane loss: extract per-sample correct channel trace
             # mem2: [T,B,10] -> [B,10,T]
-            mem2_tr = mem2.permute(1,2,0)
+            mem2_tr = mem2_rec.permute(1,2,0)
             # gather correct traces [B,T]
             idx = torch.arange(mem2_tr.size(0), device=device)
             correct_traces = mem2_tr[idx, lbls]
@@ -167,8 +167,8 @@ def objective(trial):
         for imgs, lbls in loader_val:
             imgs, lbls = imgs.to(device), lbls.to(device)
             spikes     = delta_encode(imgs, T).to(device)
-            _, _, spk2, _ = model(spikes, T)
-            out = spk2.sum(dim=0)
+            spk1, mem1_tr, spk2_rec, mem2_rec = model(spikes, T)
+            out = spk2_rec.sum(dim=0)
             correct += (out.argmax(dim=1)==lbls).sum().item()
             total   += imgs.size(0)
     return correct / total
@@ -176,7 +176,7 @@ def objective(trial):
 # ───────────────────────────── Main ─────────────────────────────────
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--trials",  type=int, default=20)
+    parser.add_argument("--trials",  type=int, default=1)
     parser.add_argument("--timeout", type=int, default=None)
     args = parser.parse_args()
 
@@ -208,15 +208,15 @@ if __name__ == "__main__":
     # Retrain full
     epoch_accs = []
     weight_histories = []
-    for epoch in range(10):
+    for epoch in range(1):
         model.train()
         tot_loss, corr = 0.0, 0
         for imgs, lbls in train_loader:
             imgs, lbls = imgs.to(device), lbls.to(device)
             spikes = delta_encode(imgs, T).to(device)
             optimizer.zero_grad()
-            spk1, _, spk2, mem2 = model(spikes, T)
-            out = spk2.sum(dim=0)
+            spk1, mem1_tr, spk2_rec, mem2_rec = model(spikes, T)
+            out = spk2_rec.sum(dim=0)
             ce_loss = loss_fn(out, lbls)
             # optional fine-tune mem loss as above if desired
             loss = ce_loss
@@ -234,10 +234,10 @@ if __name__ == "__main__":
     for imgs, lbls in test_loader:
         imgs, lbls = imgs.to(device), lbls.to(device)
         spikes = delta_encode(imgs, T).to(device)
-        _,_,_, mem2 = model(spikes, T)  # [T,B,10]
+        spk1, mem1_tr, spk2_rec, mem2_rec = model(spikes, T)
         for i,c in enumerate(lbls.cpu().numpy()):
             if mem_traces[c] is None:
-                mem_traces[c] = mem2[:,i,c].cpu()
+                mem_traces[c] = mem2_rec[:,i,c].cpu()
         if all(v is not None for v in mem_traces.values()): break
 
     # Post‑processing: exponential smoothing
@@ -268,9 +268,9 @@ if __name__ == "__main__":
     idx = 0
     for imgs, lbls in fixed_loader:
         spikes = delta_encode(imgs, T).to(device)
-        spk1, _, _ = untrained(spikes, T)
+        spk1, mem1_tr, spk2_rec, mem2_rec = untrained(spikes, T)
         # sum over time axis (axis=1) to get shape [batch, hidden], then sum batch
-        counts_before += spk1.sum(dim=2).sum(dim=0).detach().cpu().numpy()
+        counts_before += spk1.sum(dim=0).sum(dim=0).detach().cpu().numpy()
         idx += imgs.size(0)
         if idx >= 1000:
             break
@@ -284,9 +284,9 @@ if __name__ == "__main__":
     for imgs, lbls in fixed_loader:
         imgs, lbls = imgs.to(device), lbls.to(device)
         spikes = delta_encode(imgs, T).to(device)
-        spk1, _, spk2 = model(spikes, T)
-        counts_after += spk1.sum(dim=2).sum(dim=0).detach().cpu().numpy()
-        out = spk2.sum(dim=1)  # sum spikes over time for output layer
+        spk1, mem1_tr, spk2_rec, mem2_rec = model(spikes, T)
+        counts_after += spk1.sum(dim=0).sum(dim=0).detach().cpu().numpy()
+        out = spk2_rec.sum(dim=0)  # sum spikes over time for output layer
         y_true.extend(lbls.cpu().numpy())
         y_pred.extend(out.argmax(dim=1).cpu().numpy())
         idx += imgs.size(0)
@@ -344,7 +344,7 @@ if __name__ == "__main__":
     spike_trains = {i: None for i in range(10)}
     for imgs, lbls in test_loader:
         spikes = delta_encode(imgs, T).to(device)
-        spk1, _, _ = model(spikes, T)
+        spk1, mem1_tr, spk2_rec, mem2_rec = model(spikes, T)
         for j, lbl in enumerate(lbls.cpu().numpy()):
             if spike_trains[lbl] is None:
                 # take the time series of neuron j
