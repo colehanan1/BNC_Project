@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-snn_mnist_optuna_delta_waveforms.py
+snn_mnist_optuna_poission.py
 
 Spiking Neural Network hyperparameter optimisation with Optuna + snnTorch
 using **poission ON/OFF events** instead of Poisson rate coding,
@@ -104,7 +104,6 @@ class SNN(nn.Module):
 # Will be moved to device in objective
 
 def make_default_templates(T):
-    # each class: linear ramp from 0->1 scaled by class index
     t = torch.linspace(0,1,T)
     templates = torch.stack([ (c/9.0)*t for c in range(10) ])  # [10,T]
     return templates
@@ -166,7 +165,7 @@ def objective(trial):
             correct   += (preds==lbls).sum().item()
             total_spikes += spk1.abs().sum()
             samples   += imgs.size(0)
-            if batch_idx >= 10: break
+            if batch_idx >= 938: break
 
         val_acc = correct / samples
         avg_rate= total_spikes / (samples * T)
@@ -439,116 +438,116 @@ if __name__ == "__main__":
     print(f"Model state_dict saved to {save_path}")
     print(f"Final test accuracy: {overall:.4f}")
 
-# spk2_rec: [T, B, N_out] from your inference
-# choose one output neuron (e.g. neuron 0) and all trials in a small test subset
-spk_counts = spk_traces[0]  # shape [T]
-# if you have multiple trials of that same class, stack them:
-# psth_data = np.stack([spk_traces[class_id] for class_id in some_trials], axis=1)
+    # spk2_rec: [T, B, N_out] from your inference
+    # choose one output neuron (e.g. neuron 0) and all trials in a small test subset
+    spk_counts = spk_traces[0]  # shape [T]
+    # if you have multiple trials of that same class, stack them:
+    # psth_data = np.stack([spk_traces[class_id] for class_id in some_trials], axis=1)
 
-# Bin size and edges
-bin_size = 5   # in time-steps
-bins = np.arange(0, len(spk_counts)+bin_size, bin_size)
-hist, _ = np.histogram(np.where(spk_counts>0)[0], bins)
+    # Bin size and edges
+    bin_size = 5   # in time-steps
+    bins = np.arange(0, len(spk_counts)+bin_size, bin_size)
+    hist, _ = np.histogram(np.where(spk_counts>0)[0], bins)
 
-# Convert to firing rate (spikes/bin_size per trial)
-rate = hist / (bin_size * 1.0)
+    # Convert to firing rate (spikes/bin_size per trial)
+    rate = hist / (bin_size * 1.0)
 
-plt.figure(figsize=(6,4))
-plt.bar(bins[:-1], rate, width=bin_size, align='edge')
-plt.xlabel("Time step"); plt.ylabel("Firing rate (spikes/time-step)")
-plt.title("PSTH for Output Neuron 0")
-plt.show()
+    plt.figure(figsize=(6,4))
+    plt.bar(bins[:-1], rate, width=bin_size, align='edge')
+    plt.xlabel("Time step"); plt.ylabel("Firing rate (spikes/time-step)")
+    plt.title("PSTH for Output Neuron 0")
+    plt.show()
 
-# spk1_rec: [T, B, N_hidden] summed across a fixed subset (as counts_before/after)
-total_spikes = counts_after  # your post-learning per-neuron average
+    # spk1_rec: [T, B, N_hidden] summed across a fixed subset (as counts_before/after)
+    total_spikes = counts_after  # your post-learning per-neuron average
 
-plt.figure(figsize=(6,4))
-plt.hist(total_spikes, bins=50)
-plt.xlabel("Avg spikes per neuron"); plt.ylabel("Neuron count")
-plt.title("Hidden‑Layer Firing‑Rate Distribution (After Learning)")
-plt.show()
+    plt.figure(figsize=(6,4))
+    plt.hist(total_spikes, bins=50)
+    plt.xlabel("Avg spikes per neuron"); plt.ylabel("Neuron count")
+    plt.title("Hidden‑Layer Firing‑Rate Distribution (After Learning)")
+    plt.show()
 
-# choose one hidden neuron, trial 0
-spike_times = np.where(spk_traces[0]>0)[0]
-isis = np.diff(spike_times)  # inter-spike intervals in time-steps
+    # choose one hidden neuron, trial 0
+    spike_times = np.where(spk_traces[0]>0)[0]
+    isis = np.diff(spike_times)  # inter-spike intervals in time-steps
 
-plt.figure(figsize=(6,4))
-plt.hist(isis, bins=30)
-plt.xlabel("Inter‑spike interval (time‑steps)"); plt.ylabel("Count")
-plt.title("ISI Histogram for Hidden Neuron 0")
-plt.show()
+    plt.figure(figsize=(6,4))
+    plt.hist(isis, bins=30)
+    plt.xlabel("Inter‑spike interval (time‑steps)"); plt.ylabel("Count")
+    plt.title("ISI Histogram for Hidden Neuron 0")
+    plt.show()
 
-# Assume model.fc1.weight shape [N_hidden, 49]
-weights = model.fc1.weight.detach().cpu().numpy()  # [H,49]
-# Sum absolute weights of neurons that actually fired
-fired_neurons = np.where(total_spikes > np.percentile(total_spikes, 80))[0]
-saliency = np.abs(weights[fired_neurons]).sum(axis=0)  # [49]
+    # Assume model.fc1.weight shape [N_hidden, 49]
+    weights = model.fc1.weight.detach().cpu().numpy()  # [H,49]
+    # Sum absolute weights of neurons that actually fired
+    fired_neurons = np.where(total_spikes > np.percentile(total_spikes, 80))[0]
+    saliency = np.abs(weights[fired_neurons]).sum(axis=0)  # [49]
 
-# reshape to 7×7
-sal_map = saliency.reshape(7,7)
-plt.figure(figsize=(4,4))
-plt.imshow(sal_map, cmap='hot', interpolation='nearest')
-plt.colorbar(label="Activation strength")
-plt.title("Spike Activation Map (Input 7×7 Regions)")
-plt.show()
+    # reshape to 7×7
+    sal_map = saliency.reshape(7,7)
+    plt.figure(figsize=(4,4))
+    plt.imshow(sal_map, cmap='hot', interpolation='nearest')
+    plt.colorbar(label="Activation strength")
+    plt.title("Spike Activation Map (Input 7×7 Regions)")
+    plt.show()
 
-# Binarize labels
-y_bin = label_binarize(y_true, classes=list(range(10)))
-scores = np.stack([spk_traces[c].sum() for c in range(10)])  # per-class spike counts
+    # Binarize labels
+    y_bin = label_binarize(y_true, classes=list(range(10)))
+    scores = np.stack([spk_traces[c].sum() for c in range(10)])  # per-class spike counts
 
-plt.figure(figsize=(6,6))
-for c in range(10):
-    fpr, tpr, _ = roc_curve(y_bin[:,c], np.array([out.count(c) for out in y_pred]) )
-    plt.plot(fpr, tpr, label=f"Class {c} (AUC={auc(fpr,tpr):.2f})")
+    plt.figure(figsize=(6,6))
+    for c in range(10):
+        fpr, tpr, _ = roc_curve(y_bin[:,c], np.array([out.count(c) for out in y_pred]) )
+        plt.plot(fpr, tpr, label=f"Class {c} (AUC={auc(fpr,tpr):.2f})")
 
-plt.plot([0,1],[0,1],'k--')
-plt.xlabel("False Positive Rate"); plt.ylabel("True Positive Rate")
-plt.title("Multiclass ROC Curves")
-plt.legend(loc="lower right")
-plt.show()
+    plt.plot([0,1],[0,1],'k--')
+    plt.xlabel("False Positive Rate"); plt.ylabel("True Positive Rate")
+    plt.title("Multiclass ROC Curves")
+    plt.legend(loc="lower right")
+    plt.show()
 
 
-plt.figure(figsize=(6,6))
-for c in range(10):
-    y_c_true = (np.array(y_true)==c).astype(int)
-    y_c_score= np.array([spk_traces[c].sum() for _ in y_true])
-    precision, recall, _ = precision_recall_curve(y_c_true, y_c_score)
-    ap = average_precision_score(y_c_true, y_c_score)
-    plt.plot(recall, precision, label=f"Class {c} (AP={ap:.2f})")
+    plt.figure(figsize=(6,6))
+    for c in range(10):
+        y_c_true = (np.array(y_true)==c).astype(int)
+        y_c_score= np.array([spk_traces[c].sum() for _ in y_true])
+        precision, recall, _ = precision_recall_curve(y_c_true, y_c_score)
+        ap = average_precision_score(y_c_true, y_c_score)
+        plt.plot(recall, precision, label=f"Class {c} (AP={ap:.2f})")
 
-plt.xlabel("Recall"); plt.ylabel("Precision")
-plt.title("Precision–Recall Curves")
-plt.legend(loc="upper right")
-plt.show()
+    plt.xlabel("Recall"); plt.ylabel("Precision")
+    plt.title("Precision–Recall Curves")
+    plt.legend(loc="upper right")
+    plt.show()
 
-# matrix X: samples × HIDDEN, here use counts_after for each of 100 samples
-X = np.vstack([counts_after for _ in range(100)])
-y = y_true[:100]
+    # matrix X: samples × HIDDEN, here use counts_after for each of 100 samples
+    X = np.vstack([counts_after for _ in range(100)])
+    y = y_true[:100]
 
-pca = PCA(n_components=2)
-Z   = pca.fit_transform(X)
+    pca = PCA(n_components=2)
+    Z   = pca.fit_transform(X)
 
-plt.figure(figsize=(6,6))
-for c in range(10):
-    idx = np.where(np.array(y)==c)
-    plt.scatter(Z[idx,0], Z[idx,1], label=f"Class {c}", s=10)
-plt.xlabel("PC1"); plt.ylabel("PC2")
-plt.title("PCA of Hidden‑Layer Spike Counts")
-plt.legend(markerscale=2, bbox_to_anchor=(1.05,1))
-plt.show()
+    plt.figure(figsize=(6,6))
+    for c in range(10):
+        idx = np.where(np.array(y)==c)
+        plt.scatter(Z[idx,0], Z[idx,1], label=f"Class {c}", s=10)
+    plt.xlabel("PC1"); plt.ylabel("PC2")
+    plt.title("PCA of Hidden‑Layer Spike Counts")
+    plt.legend(markerscale=2, bbox_to_anchor=(1.05,1))
+    plt.show()
 
-plt.figure(figsize=(8,5))
-T = len(mem_smooth[0])
-t = np.arange(T)
-templates = np.stack([ (c/9.0)*t for c in range(10) ])
+    plt.figure(figsize=(8,5))
+    T = len(mem_smooth[0])
+    t = np.arange(T)
+    templates = np.stack([ (c/9.0)*t for c in range(10) ])
 
-for c in range(10):
-    plt.plot(t, mem_smooth[c].detach().cpu().numpy(),
-             label=f"Mem Class {c}", alpha=0.6)
-    plt.plot(t, templates[c], linestyle='--',
-             label=f"Template {c}")
+    for c in range(10):
+        plt.plot(t, mem_smooth[c].detach().cpu().numpy(),
+                 label=f"Mem Class {c}", alpha=0.6)
+        plt.plot(t, templates[c], linestyle='--',
+                 label=f"Template {c}")
 
-plt.xlabel("Time step"); plt.ylabel("Membrane potential")
-plt.title("Actual vs Target Waveforms")
-plt.legend(ncol=2, fontsize='small')
-plt.show()
+    plt.xlabel("Time step"); plt.ylabel("Membrane potential")
+    plt.title("Actual vs Target Waveforms")
+    plt.legend(ncol=2, fontsize='small')
+    plt.show()
