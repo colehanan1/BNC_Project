@@ -171,3 +171,51 @@ df = pd.DataFrame({
     "Accuracy": [accs[d] for d in labels] + [overall]
 })
 print(df.to_markdown(index=False))
+
+# ─── Manually pick a digit image and predict ──────────────────────
+import random
+
+# Select a random digit image from test set
+img_idx = random.randint(0, len(test_ds) - 1)
+img, label = test_ds[img_idx]
+
+img_input = img.unsqueeze(0).to(DEVICE)  # add batch dim
+
+# Encode and run through model
+encoded = poisson_encode(img_input, T_STEPS).to(DEVICE)  # shape [T, B=1, 49]
+_, spk2_out = model(encoded, T_STEPS)                    # spk2_out: [T, 1, 10]
+
+# Prediction from summed spikes
+out_sum = spk2_out.sum(dim=0)     # [1, 10]
+pred = out_sum.argmax(dim=1).item()
+print(f"True label: {label}, Predicted: {pred}")
+
+# ─── α‑kernel convolution for AP-shaped waveform ───────────────────
+kernel = alpha_kernel().to(DEVICE)
+ap_waveforms = []
+for c in range(10):
+    spikes = spk2_out[:, 0, c].view(1, 1, -1)  # [1,1,T]
+    ap = F.conv1d(spikes, kernel, padding=kernel.size(-1) // 2)
+    ap_waveforms.append(ap.view(-1).detach().cpu().numpy())
+
+# ─── Plot all 10 class neuron responses ───────────────────────────
+fig, axes = plt.subplots(10, 1, figsize=(6, 20), sharex=True, sharey=True)
+for c in range(10):
+    ax = axes[c]
+    ax.plot(ap_waveforms[c])
+    ax.set_title(f"Class {c}")
+    ax.set_ylim(0, 1.2)
+    ax.set_ylabel("Filtered spike")
+    ax.grid(True)
+axes[-1].set_xlabel("Time step")
+fig.suptitle("α‑Kernel Filtered Spike Waveforms for Single Input", fontsize=16, y=1.02)
+plt.tight_layout()
+plt.show()
+plt.figure(figsize=(2,2))
+plt.imshow(img.squeeze(), cmap='gray')
+plt.title(f"Digit Image (Label: {label}, Pred: {pred})")
+plt.axis('off')
+plt.show()
+
+
+
