@@ -165,7 +165,7 @@ def objective(trial):
             correct   += (preds==lbls).sum().item()
             total_spikes += spk1.abs().sum()
             samples   += imgs.size(0)
-            if batch_idx >= 10: break
+            if batch_idx >= 938: break
 
         val_acc = correct / samples
         avg_rate= total_spikes / (samples * T)
