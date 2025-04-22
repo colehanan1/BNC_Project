@@ -3,12 +3,12 @@
 snn_mnist_optuna_delta_waveforms.py
 
 Spiking Neural Network hyperparameter optimisation with Optuna + snnTorch
-using **delta‑modulation ON/OFF events** instead of Poisson rate coding,
+using **poission ON/OFF events** instead of Poisson rate coding,
 plus membrane‑potential waveform training targets and smoothing filters.
 
 Key features
 ------------
-- 7×7 avg‑pooled **delta modulation** encoder (signed spikes)
+- 7×7 avg‑pooled **poission** encoder (signed spikes)
 - Single hidden LIF -> output LIF layer, returning membrane potentials
 - Surrogate‑gradient back‑prop
 - Optuna Bayesian HPO + SuccessiveHalvingPruner
@@ -36,8 +36,6 @@ from sklearn.metrics import roc_curve, auc
 from sklearn.preprocessing import label_binarize
 from sklearn.metrics import precision_recall_curve, average_precision_score
 from sklearn.decomposition import PCA
-
-
 
 warnings.filterwarnings(
     "ignore",
