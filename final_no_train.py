@@ -100,7 +100,7 @@ for c in range(10):
     ax    = axes[c]
     ax.plot(trace)
     ax.set_title(f"Class {c}")
-    ax.set_ylim(0, 2)
+    ax.set_ylim(0, 1.2)
     ax.set_xlabel("Time step")
     ax.set_ylabel("Filtered spike")
     ax.grid(True)
