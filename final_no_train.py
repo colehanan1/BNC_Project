@@ -38,26 +38,36 @@ BETA       = torch.tensor(math.exp(-1.0 / TAU), device=DEVICE)
 class SNN(nn.Module):
     def __init__(self, num_inputs, num_hidden, num_outputs, beta1, beta2):
         super().__init__()
-        self.fc1   = nn.Linear(num_inputs, num_hidden)
-        self.lif1  = snn.Leaky(beta=beta1, spike_grad=surrogate.fast_sigmoid())
-        self.fc2   = nn.Linear(num_hidden, num_outputs)
-        self.lif2  = snn.Leaky(beta=beta2, spike_grad=surrogate.fast_sigmoid())
-        self.bias1 = nn.Parameter(torch.tensor(0.2, device=DEVICE))
+        self.fc1  = nn.Linear(num_inputs, num_hidden)
+        self.lif1 = snn.Leaky(
+            beta=beta1,
+            spike_grad=surrogate.fast_sigmoid())
+        self.fc2  = nn.Linear(num_hidden, num_outputs)
+        self.lif2 = snn.Leaky(beta=beta2,
+                              spike_grad=surrogate.fast_sigmoid())
+        self.bias1 = nn.Parameter(torch.tensor(0.2))
 
     def forward(self, x, T):
-        B = x.size(1)
+        batch_size = x.size(1)
         mem1 = self.lif1.init_leaky()
         mem2 = self.lif2.init_leaky()
         spk1_trace = []
-        spk2_rec   = torch.zeros(T, B, self.fc2.out_features, device=DEVICE)
+        mem1_trace = []
+        spk2_rec = torch.zeros(T, batch_size, self.fc2.out_features, device=device)
+        mem2_rec = torch.zeros(T, batch_size, self.fc2.out_features, device=device)
+
         for t in range(T):
-            cur1 = self.fc1(x[t]) + self.bias1
+            # add bias to keep membrane charging each step
+            cur1 = self.fc1(x[t]) + 0.2  # ← tweak 0.2 up/down
             spk1, mem1 = self.lif1(cur1, mem1)
             spk1_trace.append(spk1.detach())
+            mem1_trace.append(mem1[0,0].item())
             cur2 = self.fc2(spk1)
             spk2, mem2 = self.lif2(cur2, mem2)
             spk2_rec[t] = spk2
-        return torch.stack(spk1_trace), spk2_rec
+            mem2_rec[t] = mem2
+
+        return torch.stack(spk1_trace), mem1_trace, spk2_rec, mem2_rec
 
 # ─── Poisson encoder ─────────────────────────────────────────────
 pool7 = nn.AvgPool2d(4)
@@ -83,29 +93,38 @@ test_ds = datasets.MNIST(".", train=False, download=True,
 test_loader = torch.utils.data.DataLoader(test_ds, batch_size=64, shuffle=False)
 
 # ─── Collect one spike train per class ────────────────────────────
-spk_traces = {}
+spk_traces = {c: [] for c in range(10)}
 y_true, y_pred = [], []
+max_samples_per_class = 100  # Increase this number for more validation samples
+class_counts = {c: 0 for c in range(10)}
 for imgs, lbls in test_loader:
     imgs, lbls = imgs.to(DEVICE), lbls.to(DEVICE)
-    spikes     = poisson_encode(imgs, T_STEPS).to(DEVICE)
-    _, spk2    = model(spikes, T_STEPS)
-    out        = spk2.sum(dim=0)
+    spikes = poisson_encode(imgs, T_STEPS).to(device)
+    spk1, mem1_tr, spk2_rec, mem2_rec = model(spikes, T_STEPS)
+    out        = spk2_rec.sum(dim=0)
     preds      = out.argmax(dim=1)
     y_true.extend(lbls.cpu().numpy())
     y_pred.extend(preds.cpu().numpy())
+
     for i, c in enumerate(lbls.cpu().numpy()):
-        if c not in spk_traces:
-            spk_traces[c] = spk2[:, i, c].cpu().float()
-    if len(spk_traces) == 10:
+        if class_counts[c] < max_samples_per_class:
+
+            spk_traces[c].append(spk2_rec[:, i, c].detach().cpu().float())
+            class_counts[c] += 1
+
+        # Check if we have enough samples for all classes
+    if all(count >= max_samples_per_class for count in class_counts.values()):
         break
 
 # ─── AP‑shaped waveforms via α‑kernel ─────────────────────────────
 kernel    = alpha_kernel().to(DEVICE)
 ap_traces = {}
 for c, spk in spk_traces.items():
-    spk = spk.view(1,1,-1).to(DEVICE)
-    ap  = F.conv1d(spk, kernel, padding=kernel.size(-1)//2)
-    ap_traces[c] = ap.view(-1).detach().cpu().numpy()
+    if spk:
+        spk_tensor = spk[0]  # Or torch.stack(spk_list).mean(dim=0)
+        spk = spk_tensor.view(1, 1, -1).to(DEVICE)
+        ap  = F.conv1d(spk, kernel, padding=kernel.size(-1)//2)
+        ap_traces[c] = ap.view(-1).detach().cpu().numpy()
 
 # ─── Plot α‑kernel waveforms (10×1 vertical) ─────────────────────
 fig, axes = plt.subplots(10, 1, figsize=(6, 20), sharex=True, sharey=True)
@@ -131,8 +150,8 @@ cnt = 0
 for imgs, _ in test_loader:
     imgs = imgs.to(DEVICE)
     spikes = poisson_encode(imgs, T_STEPS).to(DEVICE)
-    spk1_u, _ = untrained(spikes, T_STEPS)
-    spk1_t, _ = model(spikes, T_STEPS)
+    spk1_u, mem1_u, spk2_u, mem2_u = untrained(spikes, T_STEPS)
+    spk1_t, mem1_t, spk2_t, mem2_t = model(spikes, T_STEPS)
     counts_before += spk1_u.sum(dim=0).sum(dim=0).detach().cpu().numpy()
     counts_after  += spk1_t.sum(dim=0).sum(dim=0).detach().cpu().numpy()
     cnt += imgs.size(0)
@@ -163,7 +182,7 @@ spike_trains = {i: None for i in range(10)}
 for imgs, lbls in test_loader:
     imgs = imgs.to(DEVICE)
     spikes = poisson_encode(imgs, T_STEPS).to(DEVICE)
-    spk1, _ = model(spikes, T_STEPS)
+    spk1, _, _, _ = model(spikes, T_STEPS)
     for j, d in enumerate(lbls.cpu().numpy()):
         if spike_trains[d] is None:
             spike_trains[d] = spk1[j].detach().cpu().numpy()
@@ -187,16 +206,18 @@ df = pd.DataFrame({
 print(df.to_markdown(index=False))
 
 
-# spk2_rec: [T, B, N_out] from your inference
-# choose one output neuron (e.g. neuron 0) and all trials in a small test subset
-spk_counts = spk_traces[0]  # shape [T]
-# if you have multiple trials of that same class, stack them:
-# psth_data = np.stack([spk_traces[class_id] for class_id in some_trials], axis=1)
+if isinstance(spk_traces[0], list) and spk_traces[0]:
+    # Use the first example from class 0
+    spk_data = spk_traces[0][0].numpy()
+else:
+    spk_data = spk_traces[0]
 
+spike_times = np.where(spk_data > 0)[0]
+isis = np.diff(spike_times)
 # Bin size and edges
 bin_size = 5   # in time-steps
-bins = np.arange(0, len(spk_counts)+bin_size, bin_size)
-hist, _ = np.histogram(np.where(spk_counts>0)[0], bins)
+bins = np.arange(0, len(spk_data)+bin_size, bin_size)
+hist, _ = np.histogram(np.where(spk_data>0)[0], bins)
 
 # Convert to firing rate (spikes/bin_size per trial)
 rate = hist / (bin_size * 1.0)
@@ -215,10 +236,6 @@ plt.hist(total_spikes, bins=50)
 plt.xlabel("Avg spikes per neuron"); plt.ylabel("Neuron count")
 plt.title("Hidden‑Layer Firing‑Rate Distribution (After Learning)")
 plt.show()
-
-# choose one hidden neuron, trial 0
-spike_times = np.where(spk_traces[0]>0)[0]
-isis = np.diff(spike_times)  # inter-spike intervals in time-steps
 
 plt.figure(figsize=(6,4))
 plt.hist(isis, bins=30)
@@ -242,11 +259,13 @@ plt.show()
 
 # Binarize labels
 y_bin = label_binarize(y_true, classes=list(range(10)))
-scores = np.stack([spk_traces[c].sum() for c in range(10)])  # per-class spike counts
+# Fix: Add detach() before converting to numpy
+scores = np.stack([torch.stack(spk_traces[c]).mean(dim=0).sum().detach().numpy() for c in range(10)])
 
 plt.figure(figsize=(6,6))
 for c in range(10):
-    fpr, tpr, _ = roc_curve(y_bin[:,c], np.array([out.count(c) for out in y_pred]) )
+    y_scores = np.array([1 if pred == c else 0 for pred in y_pred])
+    fpr, tpr, _ = roc_curve(y_bin[:,c], y_scores)
     plt.plot(fpr, tpr, label=f"Class {c} (AUC={auc(fpr,tpr):.2f})")
 
 plt.plot([0,1],[0,1],'k--')
@@ -255,11 +274,10 @@ plt.title("Multiclass ROC Curves")
 plt.legend(loc="lower right")
 plt.show()
 
-
 plt.figure(figsize=(6,6))
 for c in range(10):
     y_c_true = (np.array(y_true)==c).astype(int)
-    y_c_score= np.array([spk_traces[c].sum() for _ in y_true])
+    y_c_score = np.array([torch.stack(spk_traces[c]).mean(dim=0).sum().detach().numpy() for _ in y_true])
     precision, recall, _ = precision_recall_curve(y_c_true, y_c_score)
     ap = average_precision_score(y_c_true, y_c_score)
     plt.plot(recall, precision, label=f"Class {c} (AP={ap:.2f})")
@@ -271,6 +289,8 @@ plt.show()
 
 # matrix X: samples × HIDDEN, here use counts_after for each of 100 samples
 X = np.vstack([counts_after for _ in range(100)])
+X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
+
 y = y_true[:100]
 
 pca = PCA(n_components=2)

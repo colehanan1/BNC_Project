@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-snn_mnist_optuna_delta_waveforms.py
+snn_mnist_optuna_poission.py
 
 Spiking Neural Network hyperparameter optimisation with Optuna + snnTorch
 using **poission ON/OFF events** instead of Poisson rate coding,
