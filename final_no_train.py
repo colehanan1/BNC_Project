@@ -126,17 +126,25 @@ for c, spk in spk_traces.items():
         ap  = F.conv1d(spk, kernel, padding=kernel.size(-1)//2)
         ap_traces[c] = ap.view(-1).detach().cpu().numpy()
 
-# ─── Plot α‑kernel waveforms (10×1 vertical) ─────────────────────
-fig, axes = plt.subplots(10, 1, figsize=(6, 20), sharex=True, sharey=True)
+# ─── Plot α‑kernel waveforms (3×3 grid, wider figure) ─────────────
+fig, axes = plt.subplots(3, 3, figsize=(18, 8), sharex=True, sharey=True)  # Increased width
+axes = axes.flatten()  # Flatten the 2D array of axes for easier iteration
+
 for c in range(10):
-    trace = ap_traces[c]
-    ax    = axes[c]
-    ax.plot(trace)
-    ax.set_title(f"Class {c}")
-    ax.set_ylim(0, 1.2)
-    ax.set_xlabel("Time step")
-    ax.set_ylabel("Filtered spike")
-    ax.grid(True)
+    if c < len(axes):  # Ensure we don't access out-of-bounds indices
+        ax = axes[c]
+        trace = ap_traces[c]
+        ax.plot(trace)
+        ax.set_title(f"Class {c}")
+        ax.set_ylim(0, 1.2)
+        ax.set_xlabel("Time step")
+        ax.set_ylabel("Filtered spike")
+        ax.grid(True)
+
+# Turn off any unused subplots
+for ax in axes[9:]:
+    ax.axis('off')
+
 fig.suptitle("α‑Kernel Filtered Spike Waveforms", fontsize=16, y=1.02)
 plt.tight_layout()
 plt.show()
