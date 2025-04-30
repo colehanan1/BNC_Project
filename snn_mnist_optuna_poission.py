@@ -144,7 +144,7 @@ def objective(trial):
             correct   += (preds==lbls).sum().item()
             total_spikes += spk1.abs().sum()
             samples   += imgs.size(0)
-            if batch_idx >= 938: break
+            if batch_idx >= 30: break
 
         val_acc = correct / samples
         avg_rate= total_spikes / (samples * T)
@@ -199,7 +199,7 @@ if __name__ == "__main__":
     # Retrain full
     epoch_accs = []
     weight_histories = []
-    for epoch in range(15):
+    for epoch in range(20):
         model.train()
         tot_loss, corr = 0.0, 0
         for imgs, lbls in train_loader:

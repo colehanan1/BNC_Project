@@ -146,10 +146,12 @@ class DigitApp:
 
         self.mode_toggle.pack(side="bottom", pady=(10, 10))
         self.mode_toggle.select()  # Default to dark mode
+
     def paint(self, event):
+        pen_width = 0  # Adjust this value to change the pen width
         x, y = event.x // self.cell_size, event.y // self.cell_size
-        for dx in range(-1, 2):
-            for dy in range(-1, 2):
+        for dx in range(-pen_width, pen_width + 1):
+            for dy in range(-pen_width, pen_width + 1):
                 xi, yi = x + dx, y + dy
                 if 0 <= xi < self.grid_size and 0 <= yi < self.grid_size:
                     self.drawing[yi, xi] = 1.0
