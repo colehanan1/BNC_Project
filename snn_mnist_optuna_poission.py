@@ -1,21 +1,4 @@
 #!/usr/bin/env python3
-"""
-snn_mnist_optuna_poission.py
-
-Spiking Neural Network hyperparameter optimisation with Optuna + snnTorch
-using **poission ON/OFF events** instead of Poisson rate coding,
-plus membrane‑potential waveform training targets and smoothing filters.
-
-Key features
-------------
-- 7×7 avg‑pooled **poission** encoder (signed spikes)
-- Single hidden LIF -> output LIF layer, returning membrane potentials
-- Surrogate‑gradient back‑prop
-- Optuna Bayesian HPO + SuccessiveHalvingPruner
-- Pruning on validation accuracy, hidden spike rate, and membrane loss
-- Post‑training smoothing filter on waveform traces
-- All original visualisations retained
-"""
 
 import argparse, warnings, math
 import torch, torch.nn as nn, torch.optim as optim
@@ -99,9 +82,6 @@ class SNN(nn.Module):
 
         return torch.stack(spk1_trace), mem1_trace, spk2_rec, mem2_rec
 
-# ─────────────── Target waveform templates (one per class) ───────────
-# Define your target/templates here: shape [10, T]; example: simple ramp
-# Will be moved to device in objective
 
 def make_default_templates(T):
     t = torch.linspace(0,1,T)
@@ -149,7 +129,6 @@ def objective(trial):
             out = spk2_rec.sum(dim=0)
             ce_loss = loss_fn(out, lbls)
             # membrane loss: extract per-sample correct channel trace
-            # mem2: [T,B,10] -> [B,10,T]
             mem2_tr = mem2_rec.permute(1,2,0)
             # gather correct traces [B,T]
             idx = torch.arange(mem2_tr.size(0), device=device)
@@ -186,10 +165,9 @@ def objective(trial):
             total   += imgs.size(0)
     return correct / total
 
-# ───────────────────────────── Main ─────────────────────────────────
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--trials",  type=int, default=10)
+    parser.add_argument("--trials",  type=int, default=1)
     parser.add_argument("--timeout", type=int, default=None)
     args = parser.parse_args()
 
@@ -275,19 +253,19 @@ if __name__ == "__main__":
     plt.xlabel("Time step"); plt.ylabel("Membrane potential")
     plt.legend(); plt.show()
 
-    # ─── α‑kernel convolution to get AP‑shaped spikes ───
+    # alpha‑kernel convolution to get AP‑shaped spikes
     kernel = alpha_kernel(L=50, tau_r=1.0, tau_f=5.0,
                           dt=1.0, device=device).view(1, 1, -1)
     ap_traces = {}
     for c, spk in spk_traces.items():
-        spk = spk.view(1, 1, -1).to(device)   # move to MPS (or CUDA) same as kernel
+        spk = spk.view(1, 1, -1).to(device)
         ap = F.conv1d(spk, kernel, padding=kernel.size(-1) // 2)
         ap_traces[c] = ap.view(-1).detach().cpu().numpy()
 
     # plot AP‑shaped waveforms
     fig, axes = plt.subplots(10, 1, figsize=(6, 20), sharex=True, sharey=True)
     for c, trace in ap_traces.items():
-        ax = axes[c]  # index the 1‑D axes array directly
+        ax = axes[c]
         ax.plot(trace)
         ax.set_title(f"Class {c}")
         ax.set_ylim(0, 2)
@@ -299,7 +277,7 @@ if __name__ == "__main__":
     plt.tight_layout()
     plt.show()
 
-    # 1. Compute before‑learning counts
+    # Compute before‑learning counts
     untrained = SNN(49, hidden, 10, beta, beta).to(device)
     counts_before = np.zeros(hidden, dtype=float)
     fixed_loader = torch.utils.data.DataLoader(ds_test, batch_size=64, shuffle=False)
@@ -308,14 +286,13 @@ if __name__ == "__main__":
     for imgs, lbls in fixed_loader:
         spikes = poisson_encode(imgs, T).to(device)
         spk1, mem1_tr, spk2_rec, mem2_rec = untrained(spikes, T)
-        # sum over time axis (axis=1) to get shape [batch, hidden], then sum batch
         counts_before += spk1.sum(dim=0).sum(dim=0).detach().cpu().numpy()
         idx += imgs.size(0)
         if idx >= 1000:
             break
     counts_before /= idx
 
-    # 2. Compute after‑learning counts & gather preds
+    # Compute after‑learning counts & gather preds
     counts_after = np.zeros(hidden, dtype=float)
 
     y_true, y_pred = [], []
@@ -333,7 +310,7 @@ if __name__ == "__main__":
             break
     counts_after /= idx
 
-    # 3. Confusion Matrix (force 10×10)
+    # Confusion Matrix (force 10×10)
     labels = list(range(10))
     cm = confusion_matrix(y_true, y_pred, labels=labels)
     disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=labels)
@@ -345,7 +322,7 @@ if __name__ == "__main__":
     ax.set_title("Confusion Matrix")
     plt.show()
 
-    # 4. Epoch vs. Accuracy
+    # Epoch vs. Accuracy
     plt.figure()
     plt.plot(np.arange(1, len(epoch_accs) + 1), epoch_accs, marker='o')
     plt.xlabel("Epoch")
@@ -354,7 +331,7 @@ if __name__ == "__main__":
     plt.grid(True)
     plt.show()
 
-    # 5. Optuna plots
+    # Optuna plots
     from optuna.visualization.matplotlib import (
         plot_optimization_history,
         plot_parallel_coordinate,
@@ -372,21 +349,19 @@ if __name__ == "__main__":
     ]
     for fn in plot_funcs:
         ax = fn(study)
-        # show each subplot
         if isinstance(ax, (list, tuple, np.ndarray)):
             for subax in np.array(ax).ravel():
                 subax.figure.show()
         else:
             ax.figure.show()
 
-    # 6. Spike raster per digit
+    # Spike raster per digit
     spike_trains = {i: None for i in range(10)}
     for imgs, lbls in test_loader:
         spikes = poisson_encode(imgs, T).to(device)
         spk1, mem1_tr, spk2_rec, mem2_rec = model(spikes, T)
         for j, lbl in enumerate(lbls.cpu().numpy()):
             if spike_trains[lbl] is None:
-                # take the time series of neuron j
                 spike_trains[lbl] = spk1[j].detach().cpu().numpy()
         if all(v is not None for v in spike_trains.values()):
             break
@@ -399,7 +374,7 @@ if __name__ == "__main__":
     plt.tight_layout()
     plt.show()
 
-    # 7. Weight‑hist evolution
+    # Weight‑hist evolution
     plt.figure(figsize=(8, 6))
     for i, w in enumerate(weight_histories):
         hist, bins = np.histogram(w, bins=50, range=(-0.5, 0.5), density=True)
@@ -408,7 +383,7 @@ if __name__ == "__main__":
     plt.title("FC1 Weight Distribution")
     plt.show()
 
-    # 8. Spike activity before vs. after
+    # Spike activity before vs. after
     neurons = np.arange(hidden)
     width = 0.4
     plt.figure(figsize=(10, 4))
@@ -420,7 +395,7 @@ if __name__ == "__main__":
     plt.title("Spike Activity Before vs After")
     plt.show()
 
-    # 9. Accuracy table per digit
+    # Accuracy table per digit
     accs = {}
     for d in labels:
         idxs = [i for i, y in enumerate(y_true) if y == d]
@@ -432,24 +407,20 @@ if __name__ == "__main__":
     })
     print(df.to_markdown(index=False))
 
-    # 10. Save model state_dict
+    # Save model state_dict
     save_path = "snn_mnist_final_poission.pth"
     torch.save(model.state_dict(), save_path)
     print(f"Model state_dict saved to {save_path}")
     print(f"Final test accuracy: {overall:.4f}")
 
-    # spk2_rec: [T, B, N_out] from your inference
     # choose one output neuron (e.g. neuron 0) and all trials in a small test subset
     spk_counts = spk_traces[0]  # shape [T]
-    # if you have multiple trials of that same class, stack them:
-    # psth_data = np.stack([spk_traces[class_id] for class_id in some_trials], axis=1)
 
     # Bin size and edges
     bin_size = 5   # in time-steps
     bins = np.arange(0, len(spk_counts)+bin_size, bin_size)
     hist, _ = np.histogram(np.where(spk_counts>0)[0], bins)
 
-    # Convert to firing rate (spikes/bin_size per trial)
     rate = hist / (bin_size * 1.0)
 
     plt.figure(figsize=(6,4))
@@ -458,8 +429,7 @@ if __name__ == "__main__":
     plt.title("PSTH for Output Neuron 0")
     plt.show()
 
-    # spk1_rec: [T, B, N_hidden] summed across a fixed subset (as counts_before/after)
-    total_spikes = counts_after  # your post-learning per-neuron average
+    total_spikes = counts_after
 
     plt.figure(figsize=(6,4))
     plt.hist(total_spikes, bins=50)
@@ -467,9 +437,8 @@ if __name__ == "__main__":
     plt.title("Hidden‑Layer Firing‑Rate Distribution (After Learning)")
     plt.show()
 
-    # choose one hidden neuron, trial 0
     spike_times = np.where(spk_traces[0]>0)[0]
-    isis = np.diff(spike_times)  # inter-spike intervals in time-steps
+    isis = np.diff(spike_times)
 
     plt.figure(figsize=(6,4))
     plt.hist(isis, bins=30)
@@ -477,11 +446,9 @@ if __name__ == "__main__":
     plt.title("ISI Histogram for Hidden Neuron 0")
     plt.show()
 
-    # Assume model.fc1.weight shape [N_hidden, 49]
-    weights = model.fc1.weight.detach().cpu().numpy()  # [H,49]
-    # Sum absolute weights of neurons that actually fired
+    weights = model.fc1.weight.detach().cpu().numpy()
     fired_neurons = np.where(total_spikes > np.percentile(total_spikes, 80))[0]
-    saliency = np.abs(weights[fired_neurons]).sum(axis=0)  # [49]
+    saliency = np.abs(weights[fired_neurons]).sum(axis=0)
 
     # reshape to 7×7
     sal_map = saliency.reshape(7,7)
@@ -506,7 +473,6 @@ if __name__ == "__main__":
     plt.legend(loc="lower right")
     plt.show()
 
-
     plt.figure(figsize=(6,6))
     for c in range(10):
         y_c_true = (np.array(y_true)==c).astype(int)
@@ -520,7 +486,6 @@ if __name__ == "__main__":
     plt.legend(loc="upper right")
     plt.show()
 
-    # matrix X: samples × HIDDEN, here use counts_after for each of 100 samples
     X = np.vstack([counts_after for _ in range(100)])
     y = y_true[:100]
 
